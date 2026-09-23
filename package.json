@@ -6,6 +6,7 @@
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
 		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"test": "node -e \"require('esbuild').buildSync({ entryPoints: ['tests/phase2.test.ts', 'tests/phase3.test.ts', 'tests/phase4.test.ts', 'tests/phase5.test.ts'], outdir: 'tests', platform: 'node', format: 'cjs', bundle: true, external: ['obsidian'] })\" && node tests/phase2.test.js && node tests/phase3.test.js && node tests/phase4.test.js && node tests/phase5.test.js && rm -f tests/phase2.test.js tests/phase3.test.js tests/phase4.test.js tests/phase5.test.js",
 		"version": "node version-bump.mjs && git add manifest.json versions.json"
 	},
 	"keywords": [
