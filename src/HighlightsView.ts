@@ -49,9 +49,6 @@ export class HighlightsView extends ItemView {
 
 		try {
 			let highlights = await this.nostrService.loadUserHighlights();
-			if (this.nostrService.connectedRelays.length === 0) {
-				new Notice("Re-connect to relays...")
-			}
 			if (highlights.length > 0) {
 				container.createEl("p", { text: `Total: ${highlights.length} ✅` });
 
@@ -75,8 +72,16 @@ export class HighlightsView extends ItemView {
 						let augmentedReference;
 						if (profile) {
 							const taggedProfile = await this.nostrService.getUserProfile(profile.pubkey);
-							const { name } = JSON.parse(taggedProfile[0].content);
-							augmentedReference = `<strong>@${name}</strong>`;
+							if (taggedProfile && taggedProfile.content) {
+								try {
+									const { name } = JSON.parse(taggedProfile.content);
+									augmentedReference = `<strong>@${name}</strong>`;
+								} catch (_) {
+									augmentedReference = `<strong>@${profile.pubkey.slice(0, 8)}</strong>`;
+								}
+							} else {
+								augmentedReference = `<strong>@${profile.pubkey.slice(0, 8)}</strong>`;
+							}
 						} else if (event) {
 							let linkedEventPointer: nip19.EventPointer = {
 								id: event.id,
@@ -96,7 +101,7 @@ export class HighlightsView extends ItemView {
 					contentDiv.innerHTML = simpleAugmentedContent.replace(/\bhttps?:\/\/\S+/gi, "");
 
 					contentDiv.addEventListener("click", function() {
-						const textToCopy = contentDiv.textContent;
+						const textToCopy = contentDiv.textContent || "";
 						navigator.clipboard.writeText(textToCopy)
 							.then(() => {
 								// Show tooltip
@@ -109,7 +114,6 @@ export class HighlightsView extends ItemView {
 
 					const authorTag = highlight.tags.find((tag: any[]) => tag[0] === "p");
 
-					// TODO Need to get the highlight source article and display it with a link this is the "a" tag 
 					let sourceTag = highlight.tags.find((tag: any[]) => tag[0] === "a");
 					if (sourceTag == undefined) {
 						// try the "e" tag
@@ -126,29 +130,31 @@ export class HighlightsView extends ItemView {
 						let profileName = "";
 						let profilePicURL = "";
 
-						try {
-							const profileObject = JSON.parse(highlightProfile[0].content);
-							const { name, picture } = profileObject;
-							profileName = name;
+						if (highlightProfile && highlightProfile.content) {
+							try {
+								const profileObject = JSON.parse(highlightProfile.content);
+								const { name, picture } = profileObject;
+								profileName = name || "";
 
-							if (picture == undefined) {
-								for (const tag of highlightProfile.tags) {
-									if (tag[0] === "image") {
-										const pictureUrl = tag[1];
-										profilePicURL = pictureUrl;
-										break;
+								if (picture == undefined) {
+									for (const tag of highlightProfile.tags) {
+										if (tag[0] === "image") {
+											const pictureUrl = tag[1];
+											profilePicURL = pictureUrl;
+											break;
+										}
 									}
+								} else {
+									profilePicURL = picture;
 								}
-							} else {
-								profilePicURL = picture;
+							} catch (err) {
+								console.error("Problem Parsing Profile...setting defaults...", err);
 							}
-						} catch (err) {
-							console.error("Problem Parsing Profile...setting defaults...", err)
 						}
 
 						if (sourceTag !== undefined) {
 							if (highlightSource !== null) {
-								let sourceTitle = "Unknown..."
+								let sourceTitle = "Unknown...";
 								for (const tag of highlightSource.tags) {
 									if (tag[0] === "title") {
 										sourceTitle = tag[1];
@@ -159,9 +165,9 @@ export class HighlightsView extends ItemView {
 								let target: nip19.EventPointer = {
 									id: highlightSource.id,
 									author: highlightSource.pubkey,
-								}
+								};
 
-								let nevent = nip19.neventEncode(target)
+								let nevent = nip19.neventEncode(target);
 								const url = `https://njump.me/${nevent}`;
 
 								const contentSourceDiv = cardDiv.createEl("div", {

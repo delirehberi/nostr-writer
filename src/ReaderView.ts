@@ -49,9 +49,6 @@ export class ReaderView extends ItemView {
 
 		try {
 			let bookmarks = await this.nostrService.loadUserBookmarks();
-			if (this.nostrService.connectedRelays.length === 0) {
-				new Notice("Re-connect to relays...")
-			}
 			if (bookmarks.length > 0) {
 				container.createEl("p", { text: `Total: ${bookmarks.length} ✅` });
 
@@ -60,24 +57,26 @@ export class ReaderView extends ItemView {
 					let profileName = "";
 					let profilePicURL = "";
 
-					try {
-						const profileObject = JSON.parse(bookmarkProfile[0].content);
-						const { name, picture } = profileObject;
-						profileName = name;
+					if (bookmarkProfile && bookmarkProfile.content) {
+						try {
+							const profileObject = JSON.parse(bookmarkProfile.content);
+							const { name, picture } = profileObject;
+							profileName = name || "";
 
-						if (picture == undefined) {
-							for (const tag of bookmarkProfile.tags) {
-								if (tag[0] === "image") {
-									const pictureUrl = tag[1];
-									profilePicURL = pictureUrl;
-									break;
+							if (picture == undefined) {
+								for (const tag of bookmarkProfile.tags) {
+									if (tag[0] === "image") {
+										const pictureUrl = tag[1];
+										profilePicURL = pictureUrl;
+										break;
+									}
 								}
+							} else {
+								profilePicURL = picture;
 							}
-						} else {
-							profilePicURL = picture;
+						} catch (err) {
+							console.error("Problem Parsing Profile...setting defaults...", err);
 						}
-					} catch (err) {
-						console.error("Problem Parsing Profile...setting defaults...", err)
 					}
 
 					const cardDiv = container.createEl("div", {
@@ -107,8 +106,16 @@ export class ReaderView extends ItemView {
 						let augmentedReference;
 						if (profile) {
 							const taggedProfile = await this.nostrService.getUserProfile(profile.pubkey);
-							const { name } = JSON.parse(taggedProfile[0].content);
-							augmentedReference = `<strong>@${name}</strong>`;
+							if (taggedProfile && taggedProfile.content) {
+								try {
+									const { name } = JSON.parse(taggedProfile.content);
+									augmentedReference = `<strong>@${name}</strong>`;
+								} catch (_) {
+									augmentedReference = `<strong>@${profile.pubkey.slice(0, 8)}</strong>`;
+								}
+							} else {
+								augmentedReference = `<strong>@${profile.pubkey.slice(0, 8)}</strong>`;
+							}
 						} else if (event) {
 							let linkedEventPointer: nip19.EventPointer = {
 								id: event.id,

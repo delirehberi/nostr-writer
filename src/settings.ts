@@ -3,17 +3,30 @@ import {
 	Notice,
 	PluginSettingTab,
 	Setting,
-	TextComponent
+	TextComponent,
+	DropdownComponent,
 } from "obsidian";
 import NostrWriterPlugin from "../main";
+import { SignerType, SignerFactory } from "./signer";
+import { validateRelayUrl } from "./utils/RelayUtil";
+import { normalizeServerUrl } from "./utils/BlossomUtil";
+import { Logger } from "./utils/Logger";
+import { getPublicKey, generateSecretKey } from "nostr-tools/pure";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils";
+import { nip19 } from "nostr-tools";
 
-interface Profile {
+export interface Profile {
 	profileNickname: string;
-	profilePrivateKey: string;
+	signerType: SignerType;
+	signerTarget: string;
+	profilePrivateKey?: string; // Legacy support
 }
 
 export interface NostrWriterPluginSettings {
-	privateKey: string;
+	signerType: SignerType;
+	signerTarget: string;
+	privateKey: string; // Legacy support
+	bunkerClientSecretKey?: string;
 	shortFormEnabled: boolean;
 	statusBarEnabled: boolean;
 	relayConfigEnabled: boolean;
@@ -29,6 +42,7 @@ export class NostrWriterSettingTab extends PluginSettingTab {
 	plugin: NostrWriterPlugin;
 	private refreshDisplay: () => void;
 	private relayUrlInput: TextComponent;
+	private newBlossomServerInput: TextComponent;
 
 	constructor(app: App, plugin: NostrWriterPlugin) {
 		super(app, plugin);
@@ -38,44 +52,76 @@ export class NostrWriterSettingTab extends PluginSettingTab {
 
 	display(): void {
 		let { containerEl } = this;
-
 		containerEl.empty();
 
-		let privateKeyField: HTMLInputElement;
-		let privateKeyInput: any;
+		containerEl.createEl("h2", { text: "Nostr Writer Settings" });
+
+		// Primary Profile / Signer Configuration
+		containerEl.createEl("h4", { text: "Default Publishing Identity" });
+
+		let signerType: SignerType = this.plugin.settings.signerType || "nsec";
+		let signerTargetInput: TextComponent;
+		let signerTargetField: HTMLInputElement;
 
 		new Setting(containerEl)
-			.setName("Nostr private key")
-			.setDesc("Default profile to publish from.")
+			.setName("Signer Type")
+			.setDesc("Choose between local nsec private key or remote NIP-46 Bunker signer.")
+			.addDropdown((dropdown: DropdownComponent) => {
+				dropdown
+					.addOption("nsec", "Local nsec key")
+					.addOption("bunker", "Remote Bunker (NIP-46)")
+					.setValue(signerType)
+					.onChange(async (value: string) => {
+						signerType = value as SignerType;
+						this.plugin.settings.signerType = signerType;
+						await this.plugin.saveSettings();
+						this.refreshDisplay();
+					});
+			});
+
+		const isNsec = signerType === "nsec";
+
+		new Setting(containerEl)
+			.setName(isNsec ? "Nostr Private Key" : "Bunker Connection URI")
+			.setDesc(
+				isNsec
+					? "Enter your nsec1... or 64-character hex private key."
+					: "Enter bunker://... or nostrconnect://... URI or NIP-05 identifier."
+			)
 			.addText((text) => {
-				privateKeyInput = text;
-				text.setPlaceholder("nsec...")
-					.setValue(this.plugin.settings.privateKey)
+				signerTargetInput = text;
+				const currentVal = this.plugin.settings.signerTarget || this.plugin.settings.privateKey || "";
+				text
+					.setPlaceholder(isNsec ? "nsec1..." : "bunker://<pubkey>?relay=wss://...&secret=...")
+					.setValue(currentVal)
 					.onChange(async (value) => {
-						if (isValidPrivateKey(value)) {
-							this.plugin.settings.privateKey = value;
+						const trimmed = value.trim();
+						const isValid = await SignerFactory.isValidSignerConfig(signerType, trimmed);
+						if (isValid) {
+							this.plugin.settings.signerTarget = trimmed;
+							if (signerType === "nsec") {
+								this.plugin.settings.privateKey = trimmed;
+							}
 							await this.plugin.saveSettings();
-							this.plugin.startupNostrService();
-							new Notice("Private key saved!");
+							await this.plugin.startupNostrService();
+							new Notice(isNsec ? "Private key saved!" : "Bunker connection saved!");
 						} else {
-							new Notice("Invalid private key", 5000);
+							new Notice(isNsec ? "Invalid private key (expected nsec1...)" : "Invalid Bunker URI / identifier", 5000);
 						}
 					});
 
-				privateKeyField = text.inputEl;
-				privateKeyField.type = "password";
-				privateKeyField.style.width = "400px";
+				signerTargetField = text.inputEl;
+				signerTargetField.type = isNsec ? "password" : "text";
+				signerTargetField.style.width = "400px";
 			})
 			.addButton((button) =>
 				button
-					.setTooltip("Copy private key")
+					.setTooltip(isNsec ? "Copy private key" : "Copy Bunker URI")
 					.setIcon("copy")
 					.onClick(() => {
-						if (privateKeyField) {
-							navigator.clipboard.writeText(
-								privateKeyField.value
-							);
-							new Notice("Private Key Copied - Be Careful 🔐");
+						if (signerTargetField && signerTargetField.value) {
+							navigator.clipboard.writeText(signerTargetField.value);
+							new Notice(isNsec ? "Private Key Copied - Be Careful 🔐" : "Bunker URI Copied 📋");
 						}
 					})
 			)
@@ -83,73 +129,165 @@ export class NostrWriterSettingTab extends PluginSettingTab {
 				button
 					.setButtonText("Delete")
 					.setWarning()
-					.setTooltip("Delete the private key from memory")
+					.setTooltip("Delete this signer configuration")
 					.onClick(async () => {
 						if (
 							confirm(
-								"Are you sure you want to delete your private key? This cannot be undone."
+								`Are you sure you want to delete your default ${isNsec ? "private key" : "bunker configuration"}? This cannot be undone.`
 							)
 						) {
+							this.plugin.settings.signerTarget = "";
 							this.plugin.settings.privateKey = "";
 							await this.plugin.saveSettings();
-							privateKeyInput.setValue("");
-							this.plugin.startupNostrService();
-							new Notice("Private key deleted!🗑");
+							signerTargetInput.setValue("");
+							await this.plugin.startupNostrService();
+							new Notice("Signer configuration deleted! 🗑");
 						}
 					})
 			);
 
+		if (isNsec) {
+			new Setting(containerEl)
+				.setName("Show private key")
+				.setDesc("Toggle to show/hide the private key.")
+				.addToggle((toggle) =>
+					toggle.setValue(false).onChange((value) => {
+						if (signerTargetField) {
+							signerTargetField.type = value ? "text" : "password";
+						}
+					})
+				);
+		} else {
+			// Bunker mode: display the persistent client identity
+			let clientPkHex = "";
+			let clientNpub = "";
+			try {
+				if (this.plugin.settings.bunkerClientSecretKey) {
+					const sk = hexToBytes(this.plugin.settings.bunkerClientSecretKey);
+					clientPkHex = getPublicKey(sk);
+					clientNpub = nip19.npubEncode(clientPkHex);
+				}
+			} catch (_) {}
+
+			if (clientNpub) {
+				new Setting(containerEl)
+					.setName("Client Identity (App Pubkey)")
+					.setDesc(`Your plugin client ID in Amber / Bunker: ${clientNpub.substring(0, 16)}...${clientNpub.substring(clientNpub.length - 8)}`)
+					.addButton((btn) =>
+						btn
+							.setButtonText("Copy npub")
+							.setTooltip("Copy client npub to clipboard")
+							.onClick(() => {
+								navigator.clipboard.writeText(clientNpub);
+								new Notice("Client npub copied! 📋");
+							})
+					)
+					.addButton((btn) =>
+						btn
+							.setButtonText("Reset Session Key")
+							.setWarning()
+							.setTooltip("Generate a new local client keypair for Bunker pairing")
+							.onClick(async () => {
+								if (confirm("Reset local Bunker client keypair? You will need to re-approve the connection in Amber / your Bunker provider.")) {
+									this.plugin.settings.bunkerClientSecretKey = bytesToHex(generateSecretKey());
+									await this.plugin.saveSettings();
+									await this.plugin.startupNostrService();
+									this.refreshDisplay();
+									new Notice("New Bunker client session generated! 🔄");
+								}
+							})
+					);
+			}
+		}
+
+		// ==========================================
+		// Blossom Media Servers (BUD-01/02)
+		// ==========================================
+		containerEl.createEl("h4", { text: "Blossom Media Servers" });
+
+		const blossomProviders = this.plugin.settings.imageStorageProviders && this.plugin.settings.imageStorageProviders.length > 0
+			? this.plugin.settings.imageStorageProviders
+			: ["https://blossom.primal.net", "https://blossom.damus.io"];
+
+		let activeBlossomServer = this.plugin.settings.selectedImageStorageProvider || blossomProviders[0];
+		if (!blossomProviders.includes(activeBlossomServer)) {
+			activeBlossomServer = blossomProviders[0];
+		}
+
 		new Setting(containerEl)
-			.setName("Show private key")
-			.setDesc("Toggle to show/hide the private key.")
-			.addToggle((toggle) =>
-				toggle.setValue(false).onChange((value) => {
-					if (privateKeyField) {
-						// Set the type of the input field based on the value of the checkbox
-						privateKeyField.type = value ? "text" : "password";
+			.setName("Default Blossom Media Server")
+			.setDesc("Choose the default Blossom server for hosting article banner and inline images (BUD-01/02).")
+			.addDropdown((dropdown) => {
+				for (const p of blossomProviders) {
+					dropdown.addOption(p, p);
+				}
+				dropdown.setValue(activeBlossomServer);
+				dropdown.onChange(async (val) => {
+					this.plugin.settings.selectedImageStorageProvider = val;
+					await this.plugin.saveSettings();
+					new Notice(`🌸 Default Blossom server set to: ${val}`);
+				});
+			});
+
+		// Add Blossom Server input
+		new Setting(containerEl)
+			.setName("Add Blossom Server")
+			.setDesc("Add a custom Blossom media server URL (e.g. https://blossom.damus.io)")
+			.addText((text) => {
+				this.newBlossomServerInput = text;
+				text.setPlaceholder("https://blossom.example.com");
+			})
+			.addButton((btn) => {
+				btn.setIcon("plus");
+				btn.setCta();
+				btn.setTooltip("Add Blossom Server");
+				btn.onClick(async () => {
+					const inputVal = this.newBlossomServerInput?.getValue()?.trim();
+					if (!inputVal) {
+						new Notice("❌ Please enter a valid Blossom server URL.");
+						return;
 					}
-				})
-			);
+					const normalized = normalizeServerUrl(inputVal);
+					if (!this.plugin.settings.imageStorageProviders.includes(normalized)) {
+						this.plugin.settings.imageStorageProviders.push(normalized);
+						await this.plugin.saveSettings();
+						new Notice(`✅ Added Blossom server: ${normalized}`);
+						this.refreshDisplay();
+					} else {
+						new Notice("⚠️ Server is already configured.");
+					}
+				});
+			});
 
-//		new Setting(containerEl)
-//			.setName("Image Storage Provider")
-//			.setDesc(
-//				"Configure where you store images in your published work."
-//			)
-//				.addDropdown((dropdown) => {
-//					for (const  storageProvider of this.plugin.settings.imageStorageProviders) {
-//						dropdown.addOption(storageProvider, storageProvider);
-//					}
-//					dropdown.setValue(this.plugin.settings.selectedImageStorageProvider);
-//					dropdown.onChange(async (value) => {
-//						this.plugin.settings.selectedImageStorageProvider = value;
-//						new Notice(`🖼️ ${this.plugin.settings.selectedImageStorageProvider} selected`);
-//						await this.plugin.saveSettings();
-//						this.refreshDisplay();
-//					});
-//				});
-
-		new Setting(containerEl)
-			.setName("Premium Storage User")
-			.setDesc(
-				`Turn on if you have a premium account with nostr.build storage service.`
-			)
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.premiumStorageEnabled)
-					.onChange(async (value) => {
-						this.plugin.settings.premiumStorageEnabled = value;
-						new Notice( `✅ Premium image user mode ${value ? "enabled" : "disabled"}`);
+		// Blossom servers list
+		for (const [idx, server] of blossomProviders.entries()) {
+			new Setting(containerEl)
+				.setName(`🌸 ${server}`)
+				.addButton((btn) => {
+					btn.setIcon("trash");
+					btn.setTooltip("Remove this Blossom server");
+					btn.onClick(async () => {
+						if (this.plugin.settings.imageStorageProviders.length <= 1) {
+							new Notice("❌ You must have at least one Blossom server configured.");
+							return;
+						}
+						this.plugin.settings.imageStorageProviders.splice(idx, 1);
+						if (this.plugin.settings.selectedImageStorageProvider === server) {
+							this.plugin.settings.selectedImageStorageProvider = this.plugin.settings.imageStorageProviders[0];
+						}
 						await this.plugin.saveSettings();
 						this.refreshDisplay();
-					})
-			);
+						new Notice("🗑️ Blossom server removed.");
+					});
+				});
+		}
 
+		containerEl.createEl("br");
+
+		// Multi-Profile Support
 		new Setting(containerEl)
 			.setName("Enable multiple Nostr profiles")
-			.setDesc(
-				"Enable & add multiple Nostr profiles to publish from."
-			)
+			.setDesc("Enable & add multiple Nostr profiles (nsec or Bunker) to publish from.")
 			.addToggle((toggle) =>
 				toggle
 					.setValue(this.plugin.settings.multipleProfilesEnabled)
@@ -161,68 +299,82 @@ export class NostrWriterSettingTab extends PluginSettingTab {
 			);
 
 		if (this.plugin.settings.multipleProfilesEnabled) {
-			let newProfilePrivateKeyField: string;
-			let newProfileNicknameField: string;
-
-			let multiplePrivateKeyField: HTMLInputElement;
+			let newProfileNicknameField = "";
+			let newProfileTypeField: SignerType = "nsec";
+			let newProfileTargetField = "";
+			let newProfileTargetInputEl: HTMLInputElement;
 
 			containerEl.createEl("h5", { text: "Additional Nostr Profiles" });
-			new Setting(this.containerEl)
-				.setDesc("Add a new Nostr profile to publish from.")
-				.setName("Add Profile")
-				.addText((newAccountNicknameInput) => {
-					newAccountNicknameInput.setPlaceholder("Profile Nickname");
-					newAccountNicknameInput.onChange((value) => {
-						if (value.toLowerCase() !== "default") {
-							newProfileNicknameField = value;
-						} else {
-							new Notice("❌ Can't call an additional profile default");
-						}
-					});
 
-				})
-				.addText((newAccountNsecInput) => {
-					newAccountNsecInput.setPlaceholder("nsec");
-					newAccountNsecInput.onChange(async (value) => {
-						if (isValidPrivateKey(value)) {
-							newProfilePrivateKeyField = value;
-							new Notice("✅ Private key OK!");
+			new Setting(this.containerEl)
+				.setName("Add Profile")
+				.setDesc("Configure an additional local key or remote Bunker profile.")
+				.addText((nicknameInput) => {
+					nicknameInput.setPlaceholder("Profile Nickname");
+					nicknameInput.onChange((value) => {
+						if (value.toLowerCase() !== "default") {
+							newProfileNicknameField = value.trim();
 						} else {
-							new Notice("❌ Invalid private key", 5000);
+							new Notice("❌ Cannot name an additional profile 'default'");
 						}
 					});
-					multiplePrivateKeyField = newAccountNsecInput.inputEl;
-					multiplePrivateKeyField.type = "password";
-					multiplePrivateKeyField.style.width = "200px";
+				})
+				.addDropdown((dropdown) => {
+					dropdown
+						.addOption("nsec", "nsec")
+						.addOption("bunker", "Bunker")
+						.setValue("nsec")
+						.onChange((val) => {
+							newProfileTypeField = val as SignerType;
+							if (newProfileTargetInputEl) {
+								newProfileTargetInputEl.placeholder = newProfileTypeField === "nsec" ? "nsec1..." : "bunker://...";
+								newProfileTargetInputEl.type = newProfileTypeField === "nsec" ? "password" : "text";
+							}
+						});
+				})
+				.addText((targetInput) => {
+					targetInput.setPlaceholder("nsec1...");
+					targetInput.onChange((value) => {
+						newProfileTargetField = value.trim();
+					});
+					newProfileTargetInputEl = targetInput.inputEl;
+					newProfileTargetInputEl.type = "password";
+					newProfileTargetInputEl.style.width = "220px";
 				})
 				.addButton((btn) => {
 					btn.setIcon("plus");
 					btn.setCta();
 					btn.setTooltip("Add this profile");
 					btn.onClick(async () => {
-						if (
-							newProfilePrivateKeyField &&
-							newProfileNicknameField &&
-							this.isValidNickname(newProfileNicknameField)
-						) {
-							this.plugin.settings.profiles.push({
-								profileNickname: newProfileNicknameField,
-								profilePrivateKey: newProfilePrivateKeyField,
-							});
-							await this.plugin.saveSettings();
-							this.refreshDisplay();
-							this.plugin.nostrService.reloadMultipleAccounts();
-						} else {
-							new Notice("Add a profile nickname & a valid nsec");
-							if (!this.isValidNickname(newProfileNicknameField)) {
-								new Notice("❌ Invalid nickname - already in use");
-							}
+						if (!newProfileNicknameField || !this.isValidNickname(newProfileNicknameField)) {
+							new Notice("❌ Invalid nickname or already in use.");
+							return;
 						}
+
+						const isValid = await SignerFactory.isValidSignerConfig(newProfileTypeField, newProfileTargetField);
+						if (!isValid) {
+							new Notice(newProfileTypeField === "nsec" ? "❌ Invalid nsec private key" : "❌ Invalid Bunker URI", 5000);
+							return;
+						}
+
+						this.plugin.settings.profiles.push({
+							profileNickname: newProfileNicknameField,
+							signerType: newProfileTypeField,
+							signerTarget: newProfileTargetField,
+							profilePrivateKey: newProfileTypeField === "nsec" ? newProfileTargetField : undefined,
+						});
+
+						await this.plugin.saveSettings();
+						this.refreshDisplay();
+						await this.plugin.nostrService.reloadMultipleAccounts();
+						new Notice(`✅ Profile '${newProfileNicknameField}' added!`);
 					});
 				});
-			for (const [i, { profileNickname }] of this.plugin.settings.profiles.entries()) {
+
+			for (const [i, profile] of this.plugin.settings.profiles.entries()) {
+				const pType = profile.signerType || "nsec";
 				new Setting(this.containerEl)
-					.setName(`👤 - ${profileNickname}`)
+					.setName(`👤 ${profile.profileNickname} (${pType.toUpperCase()})`)
 					.addButton((btn) => {
 						btn.setIcon("trash");
 						btn.setWarning();
@@ -230,13 +382,13 @@ export class NostrWriterSettingTab extends PluginSettingTab {
 						btn.onClick(async () => {
 							if (
 								confirm(
-									"Are you sure you want to delete this profile? This cannot be undone."
+									`Are you sure you want to delete profile '${profile.profileNickname}'? This cannot be undone.`
 								)
 							) {
 								this.plugin.settings.profiles.splice(i, 1);
 								await this.plugin.saveSettings();
 								this.refreshDisplay();
-								this.plugin.nostrService.reloadMultipleAccounts();
+								await this.plugin.nostrService.reloadMultipleAccounts();
 								new Notice("🗑️ Profile successfully deleted.");
 							}
 						});
@@ -259,7 +411,7 @@ export class NostrWriterSettingTab extends PluginSettingTab {
 								"Are you sure you want to delete your local history? This cannot be undone."
 							)
 						) {
-							clearLocalPublishedFile();
+							await this.clearLocalPublishedFile();
 							new Notice("🗑️ Published History deleted!");
 						}
 					})
@@ -281,9 +433,12 @@ export class NostrWriterSettingTab extends PluginSettingTab {
 					})
 			);
 
+		// ==========================================
+		// Relay Management
+		// ==========================================
 		new Setting(containerEl)
 			.setName("Configure relays")
-			.setDesc("Edit the default configuration & see details.")
+			.setDesc("Edit the default relay configuration & see details.")
 			.addToggle((toggle) =>
 				toggle
 					.setValue(this.plugin.settings.relayConfigEnabled)
@@ -294,32 +449,14 @@ export class NostrWriterSettingTab extends PluginSettingTab {
 					})
 			);
 
-		new Setting(containerEl)
-			.setName("Reconnect to relays ")
-			.setDesc(
-				"Refresh connection to relays - check status bar for details."
-			)
-			.addButton((btn) => {
-				btn.setIcon("reset");
-				btn.setCta();
-				btn.setTooltip("Re-connect");
-				btn.onClick(async () => {
-					new Notice(`Re-connecting to Nostr...`);
-					this.refreshDisplay();
-					await this.plugin.nostrService.connectToRelays();
-				});
-			});
-
 		if (this.plugin.settings.relayConfigEnabled) {
 			containerEl.createEl("h5", { text: "Relay Configuration" });
 			new Setting(this.containerEl)
-				.setDesc("Add a relay URL to settings")
+				.setDesc("Add a relay URL (e.g. wss://relay.damus.io)")
 				.setName("Add Relay")
 				.addText((relayUrlInput) => {
+					this.relayUrlInput = relayUrlInput;
 					relayUrlInput.setPlaceholder("wss://fav.relay.com");
-					relayUrlInput.onChange(() => {
-						this.relayUrlInput = relayUrlInput;
-					});
 				})
 				.addButton((btn) => {
 					btn.setIcon("plus");
@@ -327,61 +464,101 @@ export class NostrWriterSettingTab extends PluginSettingTab {
 					btn.setTooltip("Add this relay");
 					btn.onClick(async () => {
 						try {
-							let addedRelayUrl = this.relayUrlInput.getValue();
-							if (this.isValidUrl(addedRelayUrl)) {
-								this.plugin.settings.relayURLs.push(
-									addedRelayUrl
-								);
-								await this.plugin.saveSettings();
-								new Notice(
-									`Added ${addedRelayUrl} to relay configuration.`
-								);
-								new Notice(`Re-connecting to Nostr...`);
-								this.refreshDisplay();
-								await this.plugin.nostrService.connectToRelays();
-								this.relayUrlInput.setValue("");
+							const rawUrl = this.relayUrlInput?.getValue()?.trim();
+							const validation = validateRelayUrl(rawUrl);
+							if (validation.isValid && validation.normalizedUrl) {
+								const cleanUrl = validation.normalizedUrl;
+								if (!this.plugin.settings.relayURLs.includes(cleanUrl)) {
+									this.plugin.settings.relayURLs.push(cleanUrl);
+									await this.plugin.saveSettings();
+									this.plugin.nostrService.refreshRelayUrls();
+									new Notice(`Added ${cleanUrl} to relay configuration.`);
+									this.refreshDisplay();
+									this.relayUrlInput.setValue("");
+								} else {
+									new Notice("⚠️ Relay already configured.");
+								}
 							} else {
-								new Notice("Invalid URL added");
+								new Notice(`❌ ${validation.error || "Invalid relay URL"}`);
 							}
 						} catch {
-							new Notice("No URL added");
+							new Notice("❌ Error adding relay URL");
 						}
 					});
 				});
+
 			for (const [i, url] of this.plugin.settings.relayURLs.entries()) {
 				new Setting(this.containerEl)
-					.setDesc(
-						`${url} is ${this.plugin.nostrService.getRelayInfo(url)
-							? "connected"
-							: "disconnected"
-						}`
-					)
-					.setName(
-						`${this.plugin.nostrService.getRelayInfo(url)
-							? "🟢"
-							: "💀"
-						} - Relay ${i + 1} `
-					)
+					.setName(`📡 Relay ${i + 1}`)
+					.setDesc(url)
 					.addButton((btn) => {
 						btn.setIcon("trash");
 						btn.setTooltip("Remove this relay");
 						btn.onClick(async () => {
 							if (
 								confirm(
-									"Are you sure you want to delete this relay? This cannot be undone."
+									`Are you sure you want to remove relay ${url}?`
 								)
 							) {
 								this.plugin.settings.relayURLs.splice(i, 1);
 								await this.plugin.saveSettings();
+								this.plugin.nostrService.refreshRelayUrls();
 								this.refreshDisplay();
-								new Notice("Relay successfully deleted.");
-								new Notice(`Re-connecting to Nostr...`);
-								this.plugin.nostrService.connectToRelays();
+								new Notice("Relay removed.");
 							}
 						});
 					});
 			}
 		}
+
+		// ==========================================
+		// Debug Logs & Diagnostics
+		// ==========================================
+		containerEl.createEl("h4", { text: "Debug Logs & Diagnostics" });
+
+		const logSetting = new Setting(this.containerEl)
+			.setName("Diagnostic Logs")
+			.setDesc("Inspect or copy recent activity, signer handshakes, and relay communication logs.")
+			.addButton((btn) => {
+				btn.setButtonText("📋 Copy Logs")
+					.setTooltip("Copy formatted debug logs to clipboard")
+					.onClick(() => {
+						const logs = Logger.getFormattedLogs();
+						navigator.clipboard.writeText(logs);
+						new Notice("📋 Debug logs copied to clipboard!");
+					});
+			})
+			.addButton((btn) => {
+				btn.setButtonText("🗑 Clear Logs")
+					.setTooltip("Clear in-memory diagnostic logs")
+					.onClick(() => {
+						Logger.clear();
+						this.refreshDisplay();
+						new Notice("🧹 Diagnostic logs cleared.");
+					});
+			});
+
+		const logDetails = containerEl.createEl("details", { cls: "nostr-collapsible-section" });
+		logDetails.open = false;
+		const logSummary = logDetails.createEl("summary", { cls: "nostr-section-summary" });
+		logSummary.setText("📜 View Live Diagnostic Logs");
+
+		const logContainer = logDetails.createEl("div", { cls: "nostr-section-content" });
+		const logArea = logContainer.createEl("textarea");
+		logArea.value = Logger.getFormattedLogs();
+		logArea.readOnly = true;
+		logArea.setCssStyles({
+			width: "100%",
+			height: "180px",
+			fontFamily: "monospace",
+			fontSize: "11px",
+			backgroundColor: "var(--background-secondary)",
+			color: "var(--text-normal)",
+			borderRadius: "4px",
+			padding: "8px",
+			border: "1px solid var(--background-modifier-border)",
+			resize: "vertical",
+		});
 
 		containerEl.createEl("h5", { text: "Support" });
 		new Setting(this.containerEl)
@@ -393,7 +570,7 @@ export class NostrWriterSettingTab extends PluginSettingTab {
 					.setIcon("zap")
 					.setCta()
 					.onClick(() => {
-						if (privateKeyField) {
+						if (signerTargetField) {
 							navigator.clipboard.writeText(
 								"lnbc200u1pjvu03dpp5x20p0q5tdwylg5hsqw3av6qxufah0y64efldazmgad2rsffgda8qdpdfehhxarjypthy6t5v4ezqnmzwd5kg6tpdcs9qmr4va5kucqzzsxqyz5vqsp5w55p4tzawyfz5fasflmsvdfnnappd6hqnw9p7y2p0nl974f0mtkq9qyyssqq6gvpnvvuftqsdqyxzn9wrre3qfkpefzz6kqwssa3pz8l9mzczyq4u7qdc09jpatw9ekln9gh47vxrvx6zg6vlsqw7pq4a7kvj4ku4qpdrflwj"
 							);
@@ -437,44 +614,27 @@ export class NostrWriterSettingTab extends PluginSettingTab {
 			});
 	}
 
-	isValidUrl(url: string) {
-		try {
-			new URL(url);
-			return true;
-		} catch (error) {
-			console.log(error);
-			return false;
-		}
-	}
-
 	isValidNickname(nickname: string): boolean {
-		let isValid: boolean = true;
-		// get the array of profiles
-		let profilesToCheck = this.plugin.settings.profiles;
+		let isValid = true;
+		const profilesToCheck = this.plugin.settings.profiles;
 		if (profilesToCheck && profilesToCheck.length > 0) {
 			for (const profile of profilesToCheck) {
-				if (profile.profileNickname == nickname) {
-					console.log("found a match");
+				if (profile.profileNickname === nickname) {
 					isValid = false;
+					break;
 				}
 			}
 		}
 		return isValid;
 	}
-}
 
-function isValidPrivateKey(key: string): boolean {
-	return (
-		typeof key === "string" && key.length === 63 && key.startsWith("nsec")
-	);
-}
-
-async function clearLocalPublishedFile() {
-	const pathToPlugin = this.app.vault.configDir + "/plugins/nostr-writer";
-	const publishedFilePath = `${pathToPlugin}/published.json`;
-	try {
-		await this.app.vault.adapter.remove(publishedFilePath);
-	} catch (error) {
-		console.log(error);
+	async clearLocalPublishedFile(): Promise<void> {
+		const pathToPlugin = this.app.vault.configDir + "/plugins/nostr-writer";
+		const publishedFilePath = `${pathToPlugin}/published.json`;
+		try {
+			await this.app.vault.adapter.remove(publishedFilePath);
+		} catch (error) {
+			console.log(error);
+		}
 	}
 }

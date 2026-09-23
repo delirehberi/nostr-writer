@@ -1,4 +1,7 @@
 import { Notice, Plugin } from "obsidian";
+import { nip19 } from "nostr-tools";
+import { generateSecretKey } from "nostr-tools/pure";
+import { bytesToHex } from "@noble/hashes/utils";
 import ShortFormModal from "src/ShortFormModal";
 import ConfirmPublishModal from "./src/ConfirmPublishModal";
 import NostrService from "./src/service/NostrService";
@@ -8,20 +11,21 @@ import {
 } from "./src/settings";
 import { PublishedView, PUBLISHED_VIEW } from "./src/PublishedView";
 import { ReaderView, READER_VIEW } from "./src/ReaderView";
-import { HighlightsView , HIGHLIGHTS_VIEW } from "./src/HighlightsView";
+import { HighlightsView, HIGHLIGHTS_VIEW } from "./src/HighlightsView";
 
 export default class NostrWriterPlugin extends Plugin {
 	nostrService: NostrService;
 	settings: NostrWriterPluginSettings;
-	private ribbonIconElShortForm: HTMLElement | null;
+	private ribbonIconElShortForm: HTMLElement | null = null;
 	statusBar: any;
 
 	async onload() {
 		await this.loadSettings();
 		this.updateStatusBar();
-		this.startupNostrService();
+		await this.startupNostrService();
 		this.addSettingTab(new NostrWriterSettingTab(this.app, this));
 		this.updateRibbonIcon();
+
 		this.registerView(
 			PUBLISHED_VIEW,
 			(leaf) => new PublishedView(leaf, this)
@@ -37,17 +41,14 @@ export default class NostrWriterPlugin extends Plugin {
 			(leaf) => new HighlightsView(leaf, this, this.nostrService)
 		);
 
-		// icon candidates : 'checkmark', 'blocks', 'scroll', 'pin'
 		this.addRibbonIcon("blocks", "See notes published to Nostr", () => {
 			this.togglePublishedView();
 		});
 
-		// icon candidates: 'bookmark', 'magnifying-glass', 'star-list', 'blocks', 'sheets-in-box'
 		this.addRibbonIcon("star-list", "See your Nostr Bookmarks", () => {
 			this.toggleReaderView();
 		});
 
-		// icon candidates: "lines-of-text",'quote-glyph'
 		this.addRibbonIcon("lines-of-text", "See your Nostr Highlights", () => {
 			this.toggleHighlightsView();
 		});
@@ -70,10 +71,13 @@ export default class NostrWriterPlugin extends Plugin {
 
 		this.addCommand({
 			id: "test-print",
-			name: "Show connected relays",
+			name: "Show configured relays",
 			callback: async () => {
-				for (let r of this.nostrService.connectedRelays) {
-					new Notice(`Connected to ${r.url}`);
+				const relays = this.nostrService.getAllConfiguredRelayUrls();
+				if (relays.length === 0) {
+					new Notice("No relays configured. Using default relays.");
+				} else {
+					new Notice(`Configured Relays (${relays.length}):\n${relays.join("\n")}`);
 				}
 			},
 		});
@@ -82,18 +86,17 @@ export default class NostrWriterPlugin extends Plugin {
 			id: "get-pub",
 			name: "See your public key",
 			callback: async () => {
-				let pubKey = this.nostrService.getPublicKey();
-				// TODO make this an npub
-				new Notice(`Public Key: ${pubKey}`);
-			},
-		});
-
-		this.addCommand({
-			id: "re-connect",
-			name: "Re-connect to relays",
-			callback: async () => {
-				this.nostrService.connectToRelays();
-				new Notice(`Attempting re-connect, see status bar.`);
+				const pubKey = await this.nostrService.getPublicKey();
+				if (pubKey) {
+					try {
+						const npub = nip19.npubEncode(pubKey);
+						new Notice(`Public Key:\n${npub}`);
+					} catch (_) {
+						new Notice(`Public Key: ${pubKey}`);
+					}
+				} else {
+					new Notice("No signer public key found. Please check settings.");
+				}
 			},
 		});
 
@@ -101,16 +104,25 @@ export default class NostrWriterPlugin extends Plugin {
 			id: "get-pub-clipboard",
 			name: "Copy public key to clipboard",
 			callback: async () => {
-				// TODO make this an npub
-				let pubKey = this.nostrService.getPublicKey();
-				navigator.clipboard
-					.writeText(pubKey)
-					.then(() => {
-						new Notice(`Public Key copied to clipboard: ${pubKey}`);
-					})
-					.catch((err) => {
-						new Notice(`Failed to copy Public Key: ${err}`);
-					});
+				const pubKey = await this.nostrService.getPublicKey();
+				if (pubKey) {
+					let toCopy = pubKey;
+					try {
+						toCopy = nip19.npubEncode(pubKey);
+					} catch (_) {
+						toCopy = pubKey;
+					}
+					navigator.clipboard
+						.writeText(toCopy)
+						.then(() => {
+							new Notice(`Public Key copied to clipboard:\n${toCopy}`);
+						})
+						.catch((err) => {
+							new Notice(`Failed to copy Public Key: ${err}`);
+						});
+				} else {
+					new Notice("No signer public key found. Please check settings.");
+				}
 			},
 		});
 	}
@@ -166,9 +178,10 @@ export default class NostrWriterPlugin extends Plugin {
 		);
 	};
 
-
-	onunload(): void {
-		this.nostrService.shutdownRelays();
+	async onunload(): Promise<void> {
+		if (this.nostrService) {
+			await this.nostrService.shutdownRelays();
+		}
 		this.app.workspace
 			.getLeavesOfType(PUBLISHED_VIEW)
 			.forEach((leaf) => leaf.detach());
@@ -180,15 +193,18 @@ export default class NostrWriterPlugin extends Plugin {
 			.forEach((leaf) => leaf.detach());
 	}
 
-	startupNostrService() {
+	async startupNostrService(): Promise<void> {
 		this.nostrService = new NostrService(this, this.app, this.settings);
 	}
 
-	async loadSettings() {
+	async loadSettings(): Promise<void> {
 		this.settings = Object.assign(
 			{},
 			{
+				signerType: "nsec",
+				signerTarget: "",
 				privateKey: "",
+				bunkerClientSecretKey: "",
 				shortFormEnabled: false,
 				statusBarEnabled: true,
 				relayConfigEnabled: false,
@@ -200,20 +216,45 @@ export default class NostrWriterPlugin extends Plugin {
 					"wss://nostr.rocks",
 					"wss://nostr.fmt.wiz.biz",
 				],
-				imageStorageProviders : [
-					"www.nostr.build",
-					"www.another.build",
+				imageStorageProviders: [
+					"https://blossom.primal.net",
+					"https://blossom.damus.io",
 				],
-				selectedImageStorageProvider: "www.nostr.build",
+				selectedImageStorageProvider: "https://blossom.primal.net",
 				premiumStorageEnabled: false,
 				multipleProfilesEnabled: false,
 				profiles: [],
 			},
 			await this.loadData()
 		);
+
+		// Ensure persistent bunker client key is generated
+		if (!this.settings.bunkerClientSecretKey || !/^[0-9a-fA-F]{64}$/.test(this.settings.bunkerClientSecretKey)) {
+			this.settings.bunkerClientSecretKey = bytesToHex(generateSecretKey());
+			await this.saveSettings();
+		}
+
+		// Backwards compatibility migration
+		if (!this.settings.signerTarget && this.settings.privateKey) {
+			this.settings.signerType = "nsec";
+			this.settings.signerTarget = this.settings.privateKey;
+		} else if (this.settings.signerTarget && !this.settings.privateKey && this.settings.signerType === "nsec") {
+			this.settings.privateKey = this.settings.signerTarget;
+		}
+
+		if (Array.isArray(this.settings.profiles)) {
+			for (const p of this.settings.profiles) {
+				if (!p.signerType) {
+					p.signerType = "nsec";
+				}
+				if (!p.signerTarget && p.profilePrivateKey) {
+					p.signerTarget = p.profilePrivateKey;
+				}
+			}
+		}
 	}
 
-	async saveSettings() {
+	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
 	}
 
@@ -221,10 +262,10 @@ export default class NostrWriterPlugin extends Plugin {
 		return content.trim() === "";
 	}
 
-	async checkAndPublish() {
-		if (!this.settings.privateKey) {
+	async checkAndPublish(): Promise<void> {
+		if (!this.nostrService.hasSignerConfigured()) {
 			new Notice(
-				`🔑 Please set your private key in the Nostr Writer Plugin settings before publishing.`
+				"🔑 Please set your private key or Bunker connection in Nostr Writer settings before publishing."
 			);
 			return;
 		}
@@ -235,46 +276,37 @@ export default class NostrWriterPlugin extends Plugin {
 				new Notice("❌ The note is empty and cannot be published.");
 				return;
 			}
-			if (this.nostrService.getConnectionStatus()) {
-				new ConfirmPublishModal(
-					this.app,
-					this.nostrService,
-					activeFile,
-					this
-				).open();
-			} else {
-				new Notice(`❗️ Please connect to Nostr before publishing.`);
-			}
+
+			new ConfirmPublishModal(
+				this.app,
+				this.nostrService,
+				activeFile,
+				this
+			).open();
 		} else {
 			new Notice("❗️ No note is currently active. Click into a note.");
 		}
 	}
 
-	updateRibbonIcon() {
+	updateRibbonIcon(): void {
 		if (this.settings.shortFormEnabled) {
 			if (!this.ribbonIconElShortForm) {
 				this.ribbonIconElShortForm = this.addRibbonIcon(
 					"pencil",
 					"Write to Nostr (short form)",
 					(evt: MouseEvent) => {
-						if (!this.settings.privateKey) {
+						if (!this.nostrService.hasSignerConfigured()) {
 							new Notice(
-								`🔑 Please set your private key in the Nostr Writer Plugin settings before publishing.`
+								"🔑 Please set your private key or Bunker connection in settings before publishing."
 							);
 							return;
 						}
-						if (this.nostrService.getConnectionStatus()) {
-							new ShortFormModal(
-								this.app,
-								this.nostrService,
-								this
-							).open();
-							return;
-						} else {
-							new Notice(
-								`❗️ Please connect to Nostr before publishing.`
-							);
-						}
+
+						new ShortFormModal(
+							this.app,
+							this.nostrService,
+							this
+						).open();
 					}
 				);
 			}
@@ -284,18 +316,32 @@ export default class NostrWriterPlugin extends Plugin {
 		}
 	}
 
-	updateStatusBar() {
+	updateStatusBar(): void {
 		if (this.settings.statusBarEnabled) {
 			if (!this.statusBar) {
 				this.statusBar = this.addStatusBarItem();
 				this.statusBar.addClass("mod-clickable");
+				this.statusBar.addEventListener("click", () => {
+					try {
+						(this.app as any).setting.open();
+						(this.app as any).setting.openTabById("nostr-writer");
+					} catch (_) {}
+				});
+			}
+
+			const isConfigured = this.nostrService?.hasSignerConfigured();
+			const signerType = this.settings.signerType === "bunker" ? "Bunker" : "nsec";
+			if (isConfigured) {
+				this.statusBar.setText(`Nostr 🟣 (${signerType})`);
 				setAttributes(this.statusBar, {
-					"aria-label": "Re-connect to Nostr",
+					"aria-label": `Nostr Writer: ${signerType} signer configured. Click for settings.`,
 					"aria-label-position": "top",
 				});
-				this.statusBar.addEventListener("click", () => {
-					this.nostrService.connectToRelays();
-					new Notice("⚡️ Re-connecting to Nostr..");
+			} else {
+				this.statusBar.setText("Nostr ⚪ (Unconfigured)");
+				setAttributes(this.statusBar, {
+					"aria-label": "Nostr Writer: No signer configured. Click to configure.",
+					"aria-label-position": "top",
 				});
 			}
 		} else if (this.statusBar) {
