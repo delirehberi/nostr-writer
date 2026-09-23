@@ -1,218 +1,207 @@
 import NostrWriterPlugin from "main";
-import * as path from 'path';
-import { nip19 } from "nostr-tools";
-import { SimplePool } from 'nostr-tools/pool';
-import { Event } from "nostr-tools/core"
-import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
-import { Relay } from "nostr-tools/relay";
+import * as path from "path";
+import { SimplePool } from "nostr-tools/pool";
+import { Event, VerifiedEvent } from "nostr-tools/core";
 import { App, Notice, TFile } from "obsidian";
-import { NostrWriterPluginSettings } from "src/settings";
-import { v4 as uuidv4 } from "uuid";
+import { NostrWriterPluginSettings, Profile } from "src/settings";
 import ImageUploadService from "./ImageUploadService";
+import { NostrSigner, SignerFactory, BunkerSigner } from "../signer";
+import { EventBuilder } from "../builder";
+import { validateSlug, extractSlug, sanitizeVaultFilename } from "../utils/SlugUtil";
+import { sanitizeRelayList, normalizeRelayUrl, validateRelayUrl } from "../utils/RelayUtil";
+import { buildImetaTag } from "../utils/BlossomUtil";
+import { Logger } from "../utils/Logger";
 
-interface Profile {
-	profileNickname: string;
-	profilePrivateKey: string;
+import { hexToBytes, bytesToHex } from "@noble/hashes/utils";
+import { generateSecretKey } from "nostr-tools/pure";
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, errorMsg: string): Promise<T> {
+	let timer: any;
+	const timeoutPromise = new Promise<T>((_, reject) => {
+		timer = setTimeout(() => {
+			reject(new Error(errorMsg));
+		}, ms);
+	});
+	try {
+		return await Promise.race([promise, timeoutPromise]);
+	} finally {
+		clearTimeout(timer);
+	}
 }
 
 export default class NostrService {
-	private privateKey: string;
-	private profiles: Profile[];
-	private multipleProfilesEnabled: boolean;
-	private publicKey: string;
+	private defaultSigner: NostrSigner | null = null;
+	private profileSigners: Map<string, NostrSigner> = new Map();
+	private defaultPublicKey: string = "";
+	private profiles: Profile[] = [];
+	private multipleProfilesEnabled: boolean = false;
 	private plugin: NostrWriterPlugin;
 	private app: App;
-	private isConnected: boolean;
-	private relayURLs: string[];
-	connectedRelays: Relay[];
-	private pool: SimplePool;
-	private poolUrls: string[];
+	private relayURLs: string[] = [];
 	private imageUploadService: ImageUploadService;
 
+	public static readonly DEFAULT_RELAYS = [
+		"wss://nos.lol",
+		"wss://relay.damus.io",
+		"wss://relay.nostr.band",
+		"wss://relayable.org",
+		"wss://nostr.rocks",
+		"wss://nostr.fmt.wiz.biz",
+	];
 
 	constructor(
 		plugin: NostrWriterPlugin,
 		app: App,
 		settings: NostrWriterPluginSettings
 	) {
-		if (!settings.privateKey) {
-			console.error(
-				"YourPlugin requires a private key to be set in the settings."
-			);
-			return;
-		}
-
-		if (settings.multipleProfilesEnabled) {
-			console.log("multiple profiles enabled")
-			this.profiles = settings.profiles;
-			this.multipleProfilesEnabled = true;
-		}
 		this.plugin = plugin;
 		this.app = app;
 		this.imageUploadService = new ImageUploadService(this.plugin, this.app, settings);
-		this.privateKey = this.convertKeyToHex(settings.privateKey);
-		this.publicKey = getPublicKey(this.privateKey);
 		this.relayURLs = [];
-		if (!settings.relayURLs) {
-			console.error(
-				"YourPlugin requires a list of relay urls to be set in the settings, defaulting."
-			);
-			this.relayURLs = [
-				"wss://nos.lol ",
-				"wss://relay.damus.io",
-				"wss://relay.nostr.band",
-				"wss://relayable.org",
-				"wss://nostr.rocks",
-				"wss://nostr.fmt.wiz.biz",
-			];
-		} else {
-			for (let url of settings.relayURLs) {
-				if (this.isValidURL(url)) {
-					this.relayURLs.push(url);
-				}
-			}
+
+		if (settings.multipleProfilesEnabled && settings.profiles) {
+			this.profiles = settings.profiles;
+			this.multipleProfilesEnabled = true;
 		}
-		this.connectToRelays();
-	}
 
-	reloadMultipleAccounts() {
-		console.log("reloading multiple accounts...")
-		this.profiles = this.plugin.settings.profiles;
-		this.multipleProfilesEnabled = true;
-	}
+		this.initSigners(settings).catch((err) => {
+			Logger.error("Failed to initialize signers:", err);
+		});
 
-
-	async connectToRelays() {
 		this.refreshRelayUrls();
-		this.connectedRelays = [];
+	}
 
-		let connectionPromises = this.relayURLs.map((url) => {
-			return new Promise<Relay | null>(async (resolve) => {
-				console.log(`Initializing NostrService with relay: ${url}`);
-				try {
-					const relayAttempt = await Relay.connect(url);
+	public async initSigners(settings: NostrWriterPluginSettings): Promise<void> {
+		this.profileSigners.clear();
 
-					relayAttempt.onclose = () => {
-						handleFailure();
+		let clientSecretBytes: Uint8Array | undefined;
+		if (settings.bunkerClientSecretKey && /^[0-9a-fA-F]{64}$/.test(settings.bunkerClientSecretKey)) {
+			try {
+				clientSecretBytes = hexToBytes(settings.bunkerClientSecretKey);
+			} catch (_) {}
+		}
+
+		const defaultTarget = settings.signerTarget || settings.privateKey;
+		if (defaultTarget) {
+			try {
+				this.defaultSigner = await SignerFactory.createSigner({
+					type: settings.signerType || "nsec",
+					target: defaultTarget,
+					clientSecretKey: clientSecretBytes,
+				});
+				this.defaultPublicKey = await this.defaultSigner.getPublicKey();
+				Logger.info(`[NostrService] Initialized default ${settings.signerType || "nsec"} signer (Pubkey: ${this.defaultPublicKey})`);
+			} catch (e) {
+				Logger.error("Failed to initialize default Nostr signer:", e);
+				this.defaultSigner = null;
+				this.defaultPublicKey = "";
+			}
+		}
+
+		if (settings.multipleProfilesEnabled && settings.profiles) {
+			for (const profile of settings.profiles) {
+				const pTarget = profile.signerTarget || profile.profilePrivateKey;
+				if (pTarget) {
+					try {
+						const signer = await SignerFactory.createSigner({
+							type: profile.signerType || "nsec",
+							target: pTarget,
+							clientSecretKey: clientSecretBytes,
+						});
+						this.profileSigners.set(profile.profileNickname, signer);
+					} catch (e) {
+						Logger.error(`Failed to initialize signer for profile '${profile.profileNickname}':`, e);
 					}
-
-					const handleFailure = () => {
-						console.log(`Disconnected from ${url}, updating status bar.`);
-						this.connectedRelays.remove(relayAttempt);
-						this.updateStatusBar();
-						resolve(null);
-					};
-
-					console.log(`Connected to ${relayAttempt.url}`);
-					this.connectedRelays.push(relayAttempt);
-					resolve(relayAttempt);
-				} catch (error) {
-					console.error(`Failed to connect to ${url}: ${error}`);
-					resolve(null);
-				}
-			});
-		});
-
-		Promise.all(connectionPromises).then(() => {
-			console.log(
-				`Connected to ${this.connectedRelays.length} / ${this.relayURLs.length} relays`
-			);
-			this.updateStatusBar();
-			if (this.connectedRelays.length > 0) {
-				this.setConnectionPool();
-				this.isConnected = true;
-			}
-		});
-	}
-
-	setConnectionPool = () => {
-		this.pool = new SimplePool()
-		this.poolUrls = [];
-		for (const relay of this.connectedRelays) {
-			this.poolUrls.push(relay.url);
-		}
-	}
-
-	updateStatusBar = () => {
-		if (this.connectedRelays.length === 0) {
-			this.plugin.statusBar?.setText("Nostr 🌚");
-			this.isConnected = false;
-		} else {
-			this.plugin.statusBar?.setText(
-				`Nostr 🟣 ${this.connectedRelays.length} / ${this.relayURLs.length} relays.`
-			);
-		}
-	};
-
-	refreshRelayUrls() {
-		this.relayURLs = [];
-		if (!this.plugin.settings.relayURLs || this.plugin.settings.relayURLs.length === 0) {
-			console.error(
-				"YourPlugin requires a list of relay urls to be set in the settings, defaulting to Damus."
-			);
-			this.relayURLs = [
-				"wss://nos.lol ",
-				"wss://relay.damus.io",
-				"wss://relay.nostr.band",
-				"wss://relayable.org",
-				"wss://nostr.fmt.wiz.biz",
-			];
-		} else {
-			for (let url of this.plugin.settings.relayURLs) {
-				if (this.isValidURL(url)) {
-					this.relayURLs.push(url);
 				}
 			}
 		}
 	}
 
-	getRelayInfo(relayUrl: string): boolean {
-		let connected: boolean = false;
-		for (let r of this.connectedRelays) {
-			if (r.url == relayUrl + "/") {
-				return r.connected;
+	public async reloadMultipleAccounts(): Promise<void> {
+		this.profiles = this.plugin.settings.profiles || [];
+		this.multipleProfilesEnabled = this.plugin.settings.multipleProfilesEnabled;
+		await this.initSigners(this.plugin.settings);
+	}
+
+	public async getSigner(profileNickname?: string): Promise<NostrSigner | null> {
+		if (profileNickname && profileNickname !== "default" && this.multipleProfilesEnabled) {
+			const signer = this.profileSigners.get(profileNickname);
+			if (signer) return signer;
+		}
+		return this.defaultSigner;
+	}
+
+	public async getPublicKey(profileNickname?: string): Promise<string> {
+		const signer = await this.getSigner(profileNickname);
+		if (signer) {
+			try {
+				return await signer.getPublicKey();
+			} catch (e) {
+				Logger.error("Failed to get public key from signer:", e);
 			}
 		}
-		return connected;
+		return this.defaultPublicKey;
+	}
+
+	public hasSignerConfigured(): boolean {
+		return !!(this.plugin.settings.signerTarget || this.plugin.settings.privateKey);
+	}
+
+	public refreshRelayUrls(): void {
+		const rawRelays = (!this.plugin.settings.relayURLs || this.plugin.settings.relayURLs.length === 0)
+			? NostrService.DEFAULT_RELAYS
+			: this.plugin.settings.relayURLs;
+		this.relayURLs = sanitizeRelayList(rawRelays);
+	}
+
+	public getRelayInfo(relayUrl: string): boolean {
+		const normalized = normalizeRelayUrl(relayUrl);
+		return normalized !== null;
 	}
 
 	public getConnectionStatus(): boolean {
-		return this.isConnected;
+		return this.hasSignerConfigured();
 	}
 
-	public getPublicKey(): string {
-		return this.publicKey;
+	public getConnectedRelayUrls(): string[] {
+		return [...this.relayURLs];
 	}
 
-	async publishShortFormNote(message: string, profileNickname: string): Promise<{ success: boolean; publishedRelays: string[] }> {
-		console.log(`Sending a short form note to Nostr...`);
-		let profilePrivateKey = this.privateKey;
-		let profilePublicKey = this.publicKey;
-		if (profileNickname !== "default" && this.multipleProfilesEnabled) {
-			console.log("recieved non-default profile: " + profileNickname);
-			for (const { profileNickname: nickname, profilePrivateKey: key } of this.profiles) {
-				if (profileNickname === nickname) {
-					profilePrivateKey = this.convertKeyToHex(key);
-					profilePublicKey = getPublicKey(profilePrivateKey);
-				}
-			}
+	public getAllConfiguredRelayUrls(): string[] {
+		return [...this.relayURLs];
+	}
+
+	async publishShortFormNote(
+		message: string,
+		profileNickname: string,
+		targetRelays?: string[]
+	): Promise<{ success: boolean; publishedRelays: string[] }> {
+		Logger.info(`[NostrService] Sending short form note to Nostr...`);
+		if (!message || message.trim() === "") {
+			Logger.error("[NostrService] No message to publish");
+			return { success: false, publishedRelays: [] };
 		}
-		if (message) {
-			let uuid: any = uuidv4().substr(0, 8);
-			let tags: any = [["d", uuid]];
 
-			let eventTemplate = {
-				kind: 1,
-				created_at: Math.floor(Date.now() / 1000),
-				tags: tags,
+		const signer = await this.getSigner(profileNickname);
+		if (!signer) {
+			new Notice("❌ No signer configured for publishing.");
+			return { success: false, publishedRelays: [] };
+		}
+
+		try {
+			const eventTemplate = EventBuilder.buildShortNoteEvent({
 				content: message,
-			};
+			});
 
-			// this assigns the pubkey, calculates the event id and signs the event in a single step
-			const signedEvent = finalizeEvent(eventTemplate, Buffer.from(profilePrivateKey))
-			return this.publishToRelays(signedEvent, "", "");
-		} else {
-			console.error("No message to publish");
+			new Notice("⏳ [1/2] Signing short note with signer...");
+			Logger.info(`[NostrService] Requesting signature from ${signer.getType()} signer...`);
+			const signedEvent = await signer.signEvent(eventTemplate);
+			Logger.info(`[NostrService] Short note signed (ID: ${signedEvent.id})`);
+
+			return await this.publishToRelays(signedEvent, "", profileNickname, targetRelays);
+		} catch (error: any) {
+			Logger.error("Failed to sign or publish short note:", error);
+			new Notice(`❌ Signing or publishing error: ${error.message || error}`, 10000);
 			return { success: false, publishedRelays: [] };
 		}
 	}
@@ -225,65 +214,62 @@ export default class NostrService {
 		title: string,
 		userSelectedTags: string[],
 		profileNickname: string,
-		publishAsDraft: boolean
+		publishAsDraft: boolean,
+		slug?: string,
+		targetRelays?: string[],
+		selectedImageStorageProvider?: string
 	): Promise<{ success: boolean; publishedRelays: string[] }> {
 		if (!publishAsDraft) {
-			new Notice(`⏳ Publishing your note ${activeFile.name} to nostr...`)
+			new Notice(`⏳ [1/3] Publishing note '${activeFile.name}' to Nostr...`);
 		} else {
-			new Notice(`⏳ Publishing your note ${activeFile.name} as a draft to nostr...`)
+			new Notice(`⏳ [1/3] Publishing note '${activeFile.name}' as draft to Nostr...`);
 		}
 
-		let profilePrivateKey = this.privateKey;
-		let profilePublicKey = this.publicKey;
-		if (profileNickname !== "default" && this.multipleProfilesEnabled) {
-			console.log("recieved non-default profile: " + profileNickname);
-			for (const { profileNickname: nickname, profilePrivateKey: key } of this.profiles) {
-				if (profileNickname === nickname) {
-					profilePrivateKey = this.convertKeyToHex(key);
-					profilePublicKey = getPublicKey(Buffer.from(profilePrivateKey));
-				}
-			}
+		if (!fileContent || fileContent.trim() === "") {
+			Logger.error("[NostrService] No content to publish");
+			return { success: false, publishedRelays: [] };
 		}
-		if (fileContent) {
-			let uuid: any = uuidv4().substr(0, 8);
-			let tags: any = [["d", uuid]];
 
-			if (summary) {
-				tags.push(["summary", summary]);
-			}
+		const signer = await this.getSigner(profileNickname);
+		if (!signer) {
+			new Notice("❌ No signer configured for publishing.");
+			return { success: false, publishedRelays: [] };
+		}
 
+		const noteTitle = (title && title.trim()) ? title.trim() : activeFile.basename;
+		const finalSlug = (slug && slug.trim()) ? slug.trim() : extractSlug(null, noteTitle);
+
+		const slugValidation = validateSlug(finalSlug);
+		if (!slugValidation.isValid) {
+			new Notice(`❌ ${slugValidation.error || "A valid slug is required."}`);
+			return { success: false, publishedRelays: [] };
+		}
+
+		Logger.info(`[NostrService] Starting publishNote: "${noteTitle}" (Slug: "${finalSlug}", Profile: "${profileNickname}", Draft: ${publishAsDraft})`);
+
+		try {
+			let bannerImageUrl: string | null = null;
 			if (imageBannerFilePath !== null) {
-				new Notice("🖼️ Uploading Banner Image")
-				let imageUploadResult = await this.imageUploadService.uploadArticleBannerImage(imageBannerFilePath);
+				Logger.info(`[NostrService] Uploading Banner Image: ${imageBannerFilePath}`);
+				new Notice("🖼️ Uploading Banner Image...");
+				let imageUploadResult = await this.imageUploadService.uploadArticleBannerImage(
+					imageBannerFilePath,
+					selectedImageStorageProvider,
+					signer
+				);
 				if (imageUploadResult !== null) {
-					tags.push(["image", imageUploadResult]);
-					new Notice("✅ Uploaded Banner Image")
+					bannerImageUrl = imageUploadResult;
+					Logger.info(`[NostrService] Banner image uploaded: ${bannerImageUrl}`);
+					new Notice("✅ Uploaded Banner Image");
 				} else {
-					new Notice("❌ Problem Uploading Banner Image..")
-				}
-			} else {
-				console.info("No banner image...")
-			}
-
-			let timestamp = Math.floor(Date.now() / 1000);
-			tags.push(["published_at", timestamp.toString()]);
-
-			if (userSelectedTags.length > 0) {
-				for (const tag of userSelectedTags) {
-					tags.push(["t", tag]);
+					Logger.warn(`[NostrService] Problem uploading banner image`);
+					new Notice("❌ Problem Uploading Banner Image..");
 				}
 			}
 
-			if (title) {
-				tags.push(["title", title]);
-			} else {
-				const noteTitle = activeFile.basename;
-				tags.push(["title", noteTitle]);
-			}
-
-			// Handle inline images, upload if possible, and replace their strings with urls in the .md content
+			// Handle inline images
+			const imetaTags: string[][] = [];
 			const imagePaths: string[] = [];
-
 			try {
 				let vaultResolvedLinks = this.app.metadataCache.resolvedLinks;
 				if (vaultResolvedLinks[activeFile.path]) {
@@ -295,47 +281,101 @@ export default class NostrService {
 					}
 				}
 				if (imagePaths.length > 0) {
-					new Notice("✅ Found inline images - uploading with article.")
-					let imageUploadResult = await this.imageUploadService.uploadImagesToStorageProvider(imagePaths)
+					Logger.info(`[NostrService] Found ${imagePaths.length} inline images to upload`);
+					new Notice(`✅ Found ${imagePaths.length} inline images - uploading with article...`);
+					let imageUploadResult = await this.imageUploadService.uploadImagesToStorageProvider(
+						imagePaths,
+						selectedImageStorageProvider,
+						signer
+					);
 					if (imageUploadResult.success && imageUploadResult.results && imageUploadResult.results.length > 0) {
 						for (const imageTarget of imageUploadResult.results) {
-							if (imageTarget.replacementStringURL !== null && imageTarget.uploadMetadata !== null) {
+							if (imageTarget.replacementStringURL !== null) {
 								fileContent = fileContent.replace(imageTarget.stringToReplace, imageTarget.replacementStringURL);
-								let imetaTag = this.getImetaTagForImage(imageTarget.uploadMetadata);
-								if (imetaTag !== null) {
-									tags.push(imetaTag);
+								if (imageTarget.imetaTag && imageTarget.imetaTag.length > 0) {
+									imetaTags.push(imageTarget.imetaTag);
 								}
 							}
 						}
-					} else {
-						console.error("Problem with the image upload, some or all images may not have successfully uploaded...")
 					}
-				} else {
-					console.error("No images found in vault for this file..")
 				}
 			} catch (e) {
-				console.error("Bigger Problem with the image upload, some or all images may not have successfully uploaded...", e)
-				new Notice("❌ Problem uploading inline images.")
+				Logger.error("Problem uploading inline images:", e);
+				new Notice("❌ Problem uploading inline images.");
 			}
 
-			let eventTemplate = {
-				kind: publishAsDraft ? 30024 : 30023,
-				created_at: timestamp,
-				tags: tags,
-				content: fileContent,
-			};
+			Logger.info(`[NostrService] Building event template (Kind ${publishAsDraft ? 30024 : 30023})...`);
+			const eventTemplate = publishAsDraft
+				? EventBuilder.buildDraftEvent({
+						slug: finalSlug,
+						title: noteTitle,
+						content: fileContent,
+						summary: summary || undefined,
+						bannerImageUrl: bannerImageUrl,
+						tags: userSelectedTags,
+						imetaTags: imetaTags.length > 0 ? imetaTags : undefined,
+				  })
+				: EventBuilder.buildLongFormEvent({
+						slug: finalSlug,
+						title: noteTitle,
+						content: fileContent,
+						summary: summary || undefined,
+						bannerImageUrl: bannerImageUrl,
+						tags: userSelectedTags,
+						imetaTags: imetaTags.length > 0 ? imetaTags : undefined,
+				  });
 
-			const finalEvent = finalizeEvent(eventTemplate, Buffer.from(profilePrivateKey))
+			new Notice(`⏳ [2/3] Requesting signature from ${signer.getType()} signer...`);
+			Logger.info(`[NostrService] Signing event with ${signer.getType()} signer...`);
+			const finalEvent = await signer.signEvent(eventTemplate);
+			Logger.info(`[NostrService] Event successfully signed (ID: ${finalEvent.id})`);
 
-			return this.publishToRelays(
+			return await this.publishToRelays(
 				finalEvent,
 				activeFile.path,
-				profileNickname
+				profileNickname,
+				targetRelays
 			);
-		} else {
-			console.error("No message to publish");
+		} catch (error: any) {
+			Logger.error("Failed to publish note:", error);
+			new Notice(`❌ Publishing error: ${error.message || error}`, 10000);
 			return { success: false, publishedRelays: [] };
 		}
+	}
+
+	public buildPreviewEvent(params: {
+		fileContent: string;
+		title: string;
+		slug: string;
+		summary?: string;
+		tags: string[];
+		publishAsDraft: boolean;
+		bannerImageUrl?: string | null;
+		imetaTags?: string[][];
+		pubkey?: string;
+		createdAt?: number;
+	}) {
+		const baseParams = {
+			slug: params.slug,
+			title: params.title,
+			content: params.fileContent,
+			summary: params.summary || undefined,
+			bannerImageUrl: params.bannerImageUrl,
+			tags: params.tags,
+			imetaTags: params.imetaTags,
+			createdAt: params.createdAt || Math.floor(Date.now() / 1000),
+		};
+
+		const template = params.publishAsDraft
+			? EventBuilder.buildDraftEvent(baseParams)
+			: EventBuilder.buildLongFormEvent(baseParams);
+
+		return {
+			...template,
+			pubkey: params.pubkey || this.defaultPublicKey || "simulated-pubkey-placeholder",
+			id: "preview-id-calculated-on-signing",
+			sig: "preview-sig-calculated-on-signing",
+		};
 	}
 
 	getImetaTagForImage(uploadData: any): string[] | null {
@@ -349,214 +389,474 @@ export default class NostrService {
 		let thumbnail = uploadData.thumbnail ? uploadData.thumbnail : null;
 
 		if (url !== null) {
-			inlineTag.push("imeta")
-			let urlString = `url ${url}`
-			inlineTag.push(urlString)
+			inlineTag.push("imeta");
+			inlineTag.push(`url ${url}`);
 		} else {
-			console.error("No upload URL in metadata, so not adding imeta tag")
 			return null;
 		}
 
 		if (mimeType !== null) {
-			let mimeString = `m ${mimeType}`
-			inlineTag.push(mimeString)
+			inlineTag.push(`m ${mimeType}`);
 		}
 		if (ox !== null) {
-			let oxString = `ox ${ox}`
-			inlineTag.push(oxString)
+			inlineTag.push(`ox ${ox}`);
 		}
 		if (size !== null) {
-			let sizeString = `size ${size}`
-			inlineTag.push(sizeString)
+			inlineTag.push(`size ${size}`);
 		}
 		if (dim !== null) {
-			let dimString = `dim ${dim}`
-			inlineTag.push(dimString)
+			inlineTag.push(`dim ${dim}`);
 		}
 		if (blurhash !== null) {
-			let blurhashString = `blurhash ${blurhash}`
-			inlineTag.push(blurhashString)
+			inlineTag.push(`blurhash ${blurhash}`);
 		}
-
 		if (thumbnail !== null) {
-			let thumbnailString = `thumb ${thumbnail}`
-			inlineTag.push(thumbnailString)
+			inlineTag.push(`thumb ${thumbnail}`);
 		}
 
 		return inlineTag;
 	}
 
 	isImagePath(filePath: string): boolean {
-		const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg'];
+		const imageExtensions = [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg"];
 		const ext = path.extname(filePath).toLowerCase();
 		return imageExtensions.includes(ext);
 	}
 
-	async getUserBookmarkIDs(): Promise<{ success: boolean; bookmark_event_ids: string[], longform_event_ids: string[] }> {
+	/**
+	 * Returns a sanitized, deduplicated list of all available relays:
+	 * configured user relays, bunker signer relays, and default fallback relays.
+	 */
+	public getUnifiedRelayUrls(): string[] {
+		const bunkerRelays: string[] = [];
+		if (this.defaultSigner instanceof BunkerSigner) {
+			bunkerRelays.push(...this.defaultSigner.getBunkerPointer().relays);
+		}
+		for (const signer of this.profileSigners.values()) {
+			if (signer instanceof BunkerSigner) {
+				bunkerRelays.push(...signer.getBunkerPointer().relays);
+			}
+		}
+
+		return sanitizeRelayList([
+			...(this.relayURLs.length > 0 ? this.relayURLs : []),
+			...bunkerRelays,
+			...NostrService.DEFAULT_RELAYS,
+		]);
+	}
+
+	/**
+	 * Queries multiple relays with timeout and EOSE support, collecting all matching events.
+	 */
+	async queryRelays(filter: any, maxWaitMs = 8000, targetRelays?: string[]): Promise<Event[]> {
+		const pool = new SimplePool();
+		const relaysToQuery = (targetRelays && targetRelays.length > 0)
+			? sanitizeRelayList(targetRelays)
+			: this.getUnifiedRelayUrls();
+
+		try {
+			const eventsMap = new Map<string, Event>();
+
+			await new Promise<void>((resolve) => {
+				let resolved = false;
+				const done = () => {
+					if (!resolved) {
+						resolved = true;
+						resolve();
+					}
+				};
+
+				const timer = setTimeout(done, maxWaitMs);
+
+				try {
+					pool.subscribeMany(
+						relaysToQuery,
+						[filter],
+						{
+							maxWait: Math.min(4000, maxWaitMs - 1000),
+							onevent(event: Event) {
+								if (!eventsMap.has(event.id)) {
+									eventsMap.set(event.id, event);
+								}
+							},
+							oneose() {
+								clearTimeout(timer);
+								done();
+							},
+							onclose() {
+								done();
+							},
+						}
+					);
+				} catch (e) {
+					clearTimeout(timer);
+					done();
+				}
+			});
+
+			return Array.from(eventsMap.values());
+		} catch (e) {
+			Logger.error("Failed to query relays:", e);
+			return [];
+		} finally {
+			pool.close(relaysToQuery);
+		}
+	}
+
+	async getUserBookmarkIDs(targetPubkey?: string): Promise<{ success: boolean; bookmark_event_ids: string[]; longform_event_ids: string[] }> {
 		const bookmark_event_ids: string[] = [];
 		const longform_event_ids: string[] = [];
 		try {
-			if (this.pool === undefined || this.poolUrls.length === 0) {
-				console.error("No pool...")
-				this.setConnectionPool();
+			const pubkey = targetPubkey || (await this.getPublicKey());
+			if (!pubkey) {
+				return { success: false, bookmark_event_ids, longform_event_ids };
 			}
-			let events = await this.pool.querySync(this.poolUrls, { kinds: [10003], authors: [this.publicKey] })
-			if (events.length > 0) {
+			const events = await this.queryRelays({ kinds: [10003], authors: [pubkey] }, 8000);
+			if (events && events.length > 0) {
 				for (let event of events) {
 					for (const tag of event.tags) {
-						if (tag[0] === 'e') {
+						if (tag[0] === "e" && tag[1]) {
 							bookmark_event_ids.push(tag[1]);
 						}
-						// handle kind 30023 long-form events
-						if (tag[0] === 'a') {
+						if (tag[0] === "a" && tag[1]) {
 							longform_event_ids.push(tag[1]);
 						}
 					}
 				}
-				return { success: true, bookmark_event_ids, longform_event_ids }
 			}
-			return events;
+			return { success: true, bookmark_event_ids, longform_event_ids };
 		} catch (error) {
-			console.error('Error occurred while fetching bookmarks ids:', error);
+			Logger.error("Error occurred while fetching bookmark ids:", error);
 			return { success: false, bookmark_event_ids, longform_event_ids };
 		}
 	}
 
-	async loadUserBookmarks(): Promise<Event[]> {
+	async loadUserBookmarks(targetPubkey?: string): Promise<Event[]> {
 		let events: Event[] = [];
 		try {
-			let res = await this.getUserBookmarkIDs();
+			let res = await this.getUserBookmarkIDs(targetPubkey);
 			if (res.success) {
-				if (this.pool === undefined || this.poolUrls.length === 0) {
-					this.setConnectionPool();
-				}
 				if (res.longform_event_ids.length > 0) {
 					for (let atag of res.longform_event_ids) {
-						let author = ""
-						let eTag = ""
-						let parts = atag.split(':');
+						let author = "";
+						let eTag = "";
+						let parts = atag.split(":");
 						if (parts.length >= 2) {
 							author = parts[1];
 							eTag = parts[2];
 						}
-						let articles = await this.pool.querySync(this.poolUrls, { authors: [author], kinds: [30023] });
-						for (let articleItem of articles) {
-							if (articleItem.tags.some(tag => tag[0] === "d" && tag[1] === eTag)) {
-								events.push(articleItem);
+						if (author) {
+							let articles = await this.queryRelays({ authors: [author], kinds: [30023] }, 6000);
+							for (let articleItem of articles) {
+								if (articleItem.tags.some((tag: string[]) => tag[0] === "d" && tag[1] === eTag)) {
+									events.push(articleItem);
+								}
 							}
 						}
-
 					}
 				}
-				let newEvents = await this.pool.querySync(this.poolUrls, { ids: res.bookmark_event_ids, kinds: [1, 30023] });
-				events.push(...newEvents);
+				if (res.bookmark_event_ids.length > 0) {
+					let newEvents = await this.queryRelays({ ids: res.bookmark_event_ids, kinds: [1, 30023] }, 6000);
+					events.push(...newEvents);
+				}
 				return events;
 			} else {
-				console.error('No bookmark IDs returned');
+				Logger.warn("No bookmark IDs returned");
+				return [];
+			}
+		} catch (err) {
+			Logger.error("Error occurred while fetching bookmarks:", err);
+			return [];
+		}
+	}
+
+	async loadUserHighlights(targetPubkey?: string): Promise<Event[]> {
+		try {
+			const pubkey = targetPubkey || (await this.getPublicKey());
+			if (!pubkey) {
+				Logger.warn("[NostrService] No public key configured to fetch highlights");
+				return [];
+			}
+			Logger.info(`[NostrService] Querying relays for Kind 9802 highlights by author ${pubkey}...`);
+			const highlights = await this.queryRelays({ authors: [pubkey], kinds: [9802] }, 8000);
+			Logger.info(`[NostrService] Discovered ${highlights.length} highlights for pubkey ${pubkey}`);
+			return highlights;
+		} catch (err) {
+			Logger.error("Error occurred while fetching highlights:", err);
+			return [];
+		}
+	}
+
+	/**
+	 * Loads all long-form articles (Kind 30023) and drafts (Kind 30024) authored by the given pubkey
+	 * directly from configured Nostr relays. Deduplicates NIP-23 replaceable events by 'd' tag
+	 * and resolves orphan/ghost unslugged duplicates.
+	 */
+	async loadUserArticlesFromRelays(targetPubkey?: string): Promise<Event[]> {
+		const targetUrls = this.getUnifiedRelayUrls();
+
+		try {
+			const authorPk = targetPubkey || (await this.getPublicKey());
+			if (!authorPk) {
+				Logger.warn("[NostrService] No public key configured to fetch remote articles");
 				return [];
 			}
 
-		} catch (err) {
-			console.error('Error occurred while fetching bookmarks:', err);
-			return [];
-		}
-	}
+			Logger.info(`[NostrService] Querying ${targetUrls.length} relays for Kind 30023/30024 articles by author ${authorPk}...`);
+			
+			const receivedEvents: Event[] = [];
+			const pool = new SimplePool();
 
-	async loadUserHighlights(): Promise<Event[]> {
-		let events: Event[] = [];
-		try {
-			if (this.pool === undefined || this.poolUrls.length === 0) {
-				this.setConnectionPool();
-			}
-			let highlights = await this.pool.querySync(this.poolUrls, { authors: [this.publicKey], kinds: [9802] });
-			if (highlights.length > 0) {
-				for (let event of highlights) {
-					events.push(event);
+			await new Promise<void>((resolve) => {
+				let resolved = false;
+				const done = () => {
+					if (!resolved) {
+						resolved = true;
+						resolve();
+					}
+				};
+
+				const timer = setTimeout(done, 6000);
+
+				try {
+					pool.subscribeMany(
+						targetUrls,
+						[{ authors: [authorPk], kinds: [30023, 30024] }],
+						{
+							maxWait: 4000,
+							onevent(event: Event) {
+								receivedEvents.push(event);
+							},
+							oneose() {
+								clearTimeout(timer);
+								done();
+							},
+							onclose() {
+								done();
+							},
+						}
+					);
+				} catch (e) {
+					clearTimeout(timer);
+					done();
+				}
+			});
+
+			pool.close(targetUrls);
+
+			// Phase 1: Deduplicate Parameterized Replaceable Events having a valid 'd' tag (latest created_at wins)
+			const sluggedArticlesMap = new Map<string, Event>();
+			const unsluggedEvents: Event[] = [];
+
+			for (const event of receivedEvents) {
+				const dTag = event.tags.find((t: string[]) => t[0] === "d")?.[1]?.trim() || "";
+				if (dTag) {
+					const coordKey = `${event.kind}:${dTag}`;
+					const existing = sluggedArticlesMap.get(coordKey);
+					if (!existing || event.created_at > existing.created_at) {
+						sluggedArticlesMap.set(coordKey, event);
+					}
+				} else {
+					unsluggedEvents.push(event);
 				}
 			}
-			return events;
 
-		} catch (err) {
-			console.error('Error occurred while fetching bookmarks:', err);
+			// Index normalized titles of slugged articles for ghost resolution
+			const sluggedTitles = new Set<string>();
+			for (const event of sluggedArticlesMap.values()) {
+				const titleTag = event.tags.find((t: string[]) => t[0] === "title")?.[1]?.trim();
+				if (titleTag) {
+					sluggedTitles.add(titleTag.toLowerCase());
+				}
+			}
+
+			// Phase 2: Filter unslugged events (discard if a slugged counterpart with the same title already exists)
+			const uniqueUnsluggedMap = new Map<string, Event>();
+			for (const event of unsluggedEvents) {
+				const titleTag = event.tags.find((t: string[]) => t[0] === "title")?.[1]?.trim();
+				const normalizedTitle = titleTag ? titleTag.toLowerCase() : "";
+
+				// If there is already a slugged article with this title, discard the unslugged duplicate
+				if (normalizedTitle && sluggedTitles.has(normalizedTitle)) {
+					Logger.debug(`[NostrService] Discarding unslugged ghost duplicate for article "${titleTag}" (ID: ${event.id})`);
+					continue;
+				}
+
+				// Keep unique unslugged standalone events by event ID
+				const existing = uniqueUnsluggedMap.get(event.id);
+				if (!existing || event.created_at > existing.created_at) {
+					uniqueUnsluggedMap.set(event.id, event);
+				}
+			}
+
+			// Phase 3: Combine and sort by created_at descending
+			const uniqueArticles = [
+				...Array.from(sluggedArticlesMap.values()),
+				...Array.from(uniqueUnsluggedMap.values()),
+			];
+			uniqueArticles.sort((a, b) => b.created_at - a.created_at);
+
+			Logger.info(`[NostrService] Discovered ${uniqueArticles.length} unique long-form articles (${sluggedArticlesMap.size} slugged, ${uniqueUnsluggedMap.size} unslugged) for pubkey ${authorPk}.`);
+			return uniqueArticles;
+		} catch (err: any) {
+			Logger.error("Error fetching user articles from relays:", err);
 			return [];
 		}
 	}
 
-
-	async getUserProfile(userHexPubKey: string): Promise<Event> {
+	/**
+	 * Imports a remote Nostr article event into the Obsidian vault as a clean Markdown file.
+	 * Reconstructs YAML frontmatter (title, slug, summary, image, tags, published_at, nostr_id)
+	 * and registers the file into published.json.
+	 */
+	async importArticleToVault(
+		articleEvent: Event,
+		profileNickname: string = "default"
+	): Promise<{ success: boolean; file: TFile | null; path: string; error?: string }> {
 		try {
-			if (this.pool === undefined || this.poolUrls.length === 0) {
-				this.setConnectionPool();
+			const title = articleEvent.tags.find((t: string[]) => t[0] === "title")?.[1] || "";
+			const slug = articleEvent.tags.find((t: string[]) => t[0] === "d")?.[1] || "";
+			const summary = articleEvent.tags.find((t: string[]) => t[0] === "summary")?.[1] || "";
+			const image = articleEvent.tags.find((t: string[]) => t[0] === "image")?.[1] || "";
+			const publishedAt = articleEvent.tags.find((t: string[]) => t[0] === "published_at")?.[1] || "";
+			const tags = articleEvent.tags.filter((t: string[]) => t[0] === "t" && t[1]).map((t: string[]) => t[1]);
+
+			// Construct clean YAML Frontmatter
+			const frontmatterLines: string[] = ["---"];
+			if (title) frontmatterLines.push(`title: "${title.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
+			if (slug) frontmatterLines.push(`slug: "${slug.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
+			if (summary) frontmatterLines.push(`summary: "${summary.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
+			if (image) frontmatterLines.push(`image: "${image.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
+			if (tags.length > 0) {
+				frontmatterLines.push("tags:");
+				for (const tag of tags) {
+					frontmatterLines.push(`  - "${tag.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
+				}
 			}
-			let profileEvent = await this.pool.querySync(this.poolUrls, { kinds: [0], authors: [userHexPubKey] })
-			return profileEvent;
+			if (publishedAt) {
+				frontmatterLines.push(`published_at: ${publishedAt}`);
+			}
+			frontmatterLines.push(`nostr_id: "${articleEvent.id}"`);
+			frontmatterLines.push(`nostr_kind: ${articleEvent.kind}`);
+			frontmatterLines.push("---");
+			frontmatterLines.push("");
+
+			const fullContent = frontmatterLines.join("\n") + (articleEvent.content || "");
+
+			// Compute safe unique vault filename
+			const baseName = sanitizeVaultFilename(title || slug || `nostr-article-${articleEvent.id.substring(0, 8)}`);
+			let targetPath = `${baseName}.md`;
+			let counter = 1;
+
+			while (this.app.vault.getAbstractFileByPath(targetPath) !== null) {
+				targetPath = `${baseName}-${counter}.md`;
+				counter++;
+			}
+
+			Logger.info(`[NostrService] Creating imported article file in vault: ${targetPath}`);
+			const createdFile = await this.app.vault.create(targetPath, fullContent);
+
+			if (createdFile instanceof TFile) {
+				// Record in published.json so local publishing history is synced
+				await this.savePublishedEvent(
+					articleEvent,
+					createdFile.path,
+					this.getUnifiedRelayUrls(),
+					profileNickname
+				);
+				return { success: true, file: createdFile, path: createdFile.path };
+			}
+
+			return { success: false, file: null, path: "", error: "Failed to create markdown file in vault" };
+		} catch (error: any) {
+			Logger.error("Failed to import article into vault:", error);
+			return { success: false, file: null, path: "", error: error.message || String(error) };
+		}
+	}
+
+	async getUserProfile(userHexPubKey: string): Promise<Event | null> {
+		try {
+			const events = await this.queryRelays({ kinds: [0], authors: [userHexPubKey] }, 6000);
+			if (events && events.length > 0) {
+				events.sort((a, b) => b.created_at - a.created_at);
+				return events[0];
+			}
+			return null;
 		} catch (err) {
-			console.error('Error occurred while fetching bookmarks:', err);
+			Logger.error("Error occurred while fetching profile:", err);
 			return null;
 		}
 	}
 
-	//	The a tag, used to refer to a (maybe parameterized) replaceable event
-	//for a parameterized replaceable event: ["a", <kind integer>:<32-bytes lowercase hex of a pubkey>:<d tag value>, <recommended relay URL, optional>]
-	//for a non-parameterized replaceable event: ["a", <kind integer>:<32-bytes lowercase hex of a pubkey>:, <recommended relay URL, optional>]
-	async getEventFromATag(tagValue: string): Promise<Event> {
-		let events = [];
+	async getEventFromATag(tagValue: string): Promise<Event | null> {
 		try {
-			if (this.pool === undefined || this.poolUrls.length === 0) {
-				this.setConnectionPool();
-			}
 			let eventParts = tagValue.split(":");
-			let articles = await this.pool.querySync(this.poolUrls, { kinds: [parseInt(eventParts[0], 10)], authors: [eventParts[1]] })
+			if (eventParts.length < 3) return null;
+			const kind = parseInt(eventParts[0], 10);
+			const author = eventParts[1];
+			const dTag = eventParts[2];
+			const articles = await this.queryRelays({ kinds: [kind], authors: [author] }, 6000);
 			for (let articleItem of articles) {
-				if (articleItem.tags.some(tag => tag[0] === "d" && tag[1] === eventParts[2])) {
-					events.push(articleItem);
+				if (articleItem.tags.some((tag: string[]) => tag[0] === "d" && tag[1] === dTag)) {
+					return articleItem;
 				}
 			}
-			return events[0];
+			return null;
 		} catch (err) {
-			console.error('Error occurred while fetching bookmarks:', err);
+			Logger.error("Error occurred while fetching event from a tag:", err);
 			return null;
 		}
 	}
 
 	async publishToRelays(
-		finalEvent: Event,
+		finalEvent: VerifiedEvent | Event,
 		filePath: string,
-		profileNickname: string
+		profileNickname: string,
+		targetRelays?: string[]
 	): Promise<{ success: boolean; publishedRelays: string[] }> {
+		const targetUrls = (targetRelays && targetRelays.length > 0)
+			? sanitizeRelayList(targetRelays)
+			: this.getUnifiedRelayUrls();
+
+		Logger.info(`[NostrService] On-demand broadcast of Kind ${finalEvent.kind} event (${finalEvent.id}) to ${targetUrls.length} relays: ${targetUrls.join(", ")}`);
+		new Notice(`📡 [3/3] Broadcasting to ${targetUrls.length} relays...`);
+
+		const pool = new SimplePool();
+
 		try {
-			let publishingPromises = this.connectedRelays.map(async (relay) => {
+			const publishingPromises = targetUrls.map(async (url) => {
 				try {
-					if (relay.connected) {
-						console.log(`Publishing to ${relay.url}`);
-						await relay.publish(finalEvent);
-						console.log(`Event published successfully to ${relay.url}`);
-						return { success: true, url: relay.url };
-					} else {
-						console.log(`Skipping disconnected relay: ${relay.url}`);
-						return { success: false };
-					}
-				} catch (error) {
-					console.error(`Failed to publish event to ${relay.url}: ${error}`);
-					return { success: false };
+					Logger.info(`[NostrService] Publishing to relay: ${url}`);
+					const pubs = pool.publish([url], finalEvent);
+					await withTimeout(
+						Promise.any(pubs),
+						12000,
+						`Relay ${url} publish timeout (12s)`
+					);
+					Logger.info(`[NostrService] ✅ Successfully published to ${url}`);
+					return { success: true, url };
+				} catch (error: any) {
+					Logger.warn(`[NostrService] ⚠️ Failed to publish to ${url}: ${error.message || error}`);
+					return { success: false, url };
 				}
 			});
 
-			let results = await Promise.all(publishingPromises);
-			let publishedRelays = results
-				.filter((result) => result.success)
-				.map((result) => result.url!);
+			const results = await Promise.all(publishingPromises);
+			const publishedRelays = results
+				.filter((result): result is { success: boolean; url: string } => result.success && typeof result.url === "string")
+				.map((result) => result.url);
 
-			console.log(
-				`Published to ${publishedRelays.length} / ${this.connectedRelays.length} relays.`
+			Logger.info(
+				`[NostrService] Published to ${publishedRelays.length} / ${targetUrls.length} relays.`
 			);
 
 			if (publishedRelays.length === 0) {
-				console.log("Didn't send to any relays");
+				Logger.error("[NostrService] Event was not accepted by any selected relays.");
+				new Notice("❌ Could not publish to any relays. Check your relay connections.", 8000);
 				return { success: false, publishedRelays: [] };
 			} else {
-				if (finalEvent.kind === 30023) {
-					this.savePublishedEvent(
+				if (finalEvent.kind === 30023 && filePath) {
+					await this.savePublishedEvent(
 						finalEvent,
 						filePath,
 						publishedRelays,
@@ -565,33 +865,25 @@ export default class NostrService {
 				}
 				return { success: true, publishedRelays };
 			}
-		} catch (error) {
-			console.error("An error occurred while publishing to relays", error);
+		} catch (error: any) {
+			Logger.error("An error occurred while publishing to relays:", error);
+			new Notice(`❌ Relay error: ${error.message || error}`, 10000);
 			return { success: false, publishedRelays: [] };
+		} finally {
+			pool.close(targetUrls);
 		}
 	}
 
-
-	shutdownRelays() {
-		console.log("Shutting down Nostr service");
-		if (this.connectedRelays.length > 0) {
-			for (let r of this.connectedRelays) {
-				r.close();
+	async shutdownRelays() {
+		Logger.info("Shutting down Nostr service signers and resources");
+		if (this.defaultSigner && this.defaultSigner.close) {
+			await this.defaultSigner.close();
+		}
+		for (const signer of this.profileSigners.values()) {
+			if (signer.close) {
+				await signer.close();
 			}
-			this.pool.close();
 		}
-	}
-
-	convertKeyToHex(value: string): string {
-		if (value && value.startsWith("nsec")) {
-			let decodedPrivateKey = nip19.decode(value);
-			return decodedPrivateKey.data as string;
-		}
-		if (value && value.startsWith("npub")) {
-			let decodedPublicKey = nip19.decode(value);
-			return decodedPublicKey.data as string;
-		}
-		return value;
 	}
 
 	async savePublishedEvent(
@@ -624,12 +916,11 @@ export default class NostrService {
 		);
 	}
 
-	isValidURL(url: string) {
+	isValidURL(url: string): boolean {
 		try {
 			new URL(url);
 			return true;
 		} catch (error) {
-			console.log(error);
 			return false;
 		}
 	}

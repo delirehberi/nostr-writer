@@ -1,157 +1,224 @@
 import NostrWriterPlugin from "main";
-import axios from 'axios';
-import { App, Notice, FileSystemAdapter, RequestUrlParam, TFile, normalizePath, requestUrl } from "obsidian";
+import { App, Notice, FileSystemAdapter, TFile, normalizePath, requestUrl } from "obsidian";
 import { NostrWriterPluginSettings } from "src/settings";
-import { finalizeEvent, nip98, nip19 } from "nostr-tools";
+import { NostrSigner } from "../signer";
+import {
+	BlossomBlobDescriptor,
+	buildImetaTag,
+	computeSha256,
+	generateNip98AuthHeader,
+	getMimeTypeFromFileName,
+	normalizeServerUrl,
+} from "../utils/BlossomUtil";
+
+export interface ImageUploadResultItem {
+	filePath: string;
+	stringToReplace: string;
+	replacementStringURL: string;
+	imetaTag: string[];
+	blobDescriptor: BlossomBlobDescriptor;
+}
+
+export interface ImageUploadBatchResult {
+	success: boolean;
+	results: ImageUploadResultItem[];
+}
 
 export default class ImageUploadService {
 	private plugin: NostrWriterPlugin;
 	private app: App;
-	private targetProvider: string;
-	private premiumNIP98User: boolean;
-	private privateKey: string;
-	private static readonly UPLOAD_ENDPOINT = "https://nostr.build/api/v2/upload/files";
-
+	private defaultServer: string;
 
 	constructor(plugin: NostrWriterPlugin, app: App, settings: NostrWriterPluginSettings) {
-		this.targetProvider = settings.selectedImageStorageProvider;
-		this.premiumNIP98User = settings.premiumStorageEnabled;
 		this.plugin = plugin;
-		this.privateKey = this.convertKeyToHex(settings.privateKey);
 		this.app = app;
+		this.defaultServer = normalizeServerUrl(
+			settings.selectedImageStorageProvider || "https://blossom.primal.net"
+		);
 	}
 
-	async uploadArticleBannerImage(imageFilePath: string): Promise<string | null> {
-		let result = null;
+	/**
+	 * Uploads a single binary blob to a Blossom media server using BUD-01/02 and NIP-98 authentication.
+	 */
+	public async uploadBlob(
+		data: ArrayBuffer,
+		mimeType: string,
+		serverUrl?: string,
+		signer?: NostrSigner | null
+	): Promise<BlossomBlobDescriptor | null> {
+		const targetServer = normalizeServerUrl(serverUrl || this.defaultServer);
+		const uploadUrl = `${targetServer}/upload`;
+
 		try {
-			let path = normalizePath(imageFilePath);
-			let imageBuffer = await FileSystemAdapter.readLocalFile(path);
-			if (imageBuffer) {
-				const formData = new FormData();
-				formData.append('file', new Blob([imageBuffer]));
-				let headers: Record<string, string> = {
-					'Content-Type': 'multipart/form-data',
-				};
+			const sha256Hex = computeSha256(data);
+			const headers: Record<string, string> = {
+				"Content-Type": mimeType,
+			};
 
-				if (this.premiumNIP98User) {
-					let base64encodedEventString = await nip98.getToken(ImageUploadService.UPLOAD_ENDPOINT, 'post',
-						(authEvent) => finalizeEvent(authEvent, Buffer.from(this.privateKey)), true);
-					headers['Authorization'] = base64encodedEventString;
-					new Notice("⏳ Uploading as premium user.")
-				}
-
-				const response = await axios.post('https://nostr.build/api/v2/upload/files', formData, {
-					headers: headers,
-				});
-				const { data } = response;
-				if (Array.isArray(data.data) && data.data.length > 0) {
-					result = data.data[0].url;
+			if (signer) {
+				try {
+					const authHeader = await generateNip98AuthHeader({
+						uploadUrl,
+						method: "PUT",
+						sha256Hex,
+						signer,
+					});
+					headers["Authorization"] = authHeader;
+				} catch (authErr) {
+					console.warn("Failed to generate NIP-98 auth header, proceeding without auth:", authErr);
 				}
 			}
+
+			const response = await requestUrl({
+				url: uploadUrl,
+				method: "PUT",
+				headers,
+				body: data,
+			});
+
+			if (response.status >= 200 && response.status < 300) {
+				let descriptor: BlossomBlobDescriptor;
+				try {
+					descriptor = response.json;
+				} catch (_) {
+					descriptor = {
+						url: `${targetServer}/${sha256Hex}`,
+						sha256: sha256Hex,
+					};
+				}
+
+				// Fill in fallback metadata if server returned partial response
+				if (!descriptor.url) {
+					descriptor.url = `${targetServer}/${sha256Hex}`;
+				}
+				if (!descriptor.sha256) {
+					descriptor.sha256 = sha256Hex;
+				}
+				if (!descriptor.type) {
+					descriptor.type = mimeType;
+				}
+				if (!descriptor.size) {
+					descriptor.size = data.byteLength;
+				}
+
+				// Check headers for dimensions (BUD-02 extension)
+				const dimHeader = response.headers?.["x-dimensions"] || response.headers?.["dimensions"];
+				if (dimHeader && !descriptor.dim) {
+					descriptor.dim = dimHeader;
+				}
+
+				return descriptor;
+			} else {
+				console.error(`Blossom upload failed with status ${response.status}:`, response.text);
+				return null;
+			}
 		} catch (error) {
-			console.error(`Problem with image file reading : ${error}`)
+			console.error(`Blossom upload error to ${uploadUrl}:`, error);
+			return null;
 		}
-		return result;
 	}
 
-	async uploadImagesToStorageProvider(imageFilePaths: string[]): Promise<{ success: boolean, results: { filePath: string, stringToReplace: string, replacementStringURL: string, uploadMetadata: any }[] }> {
-		let uploadResults = [];
+	/**
+	 * Uploads an article banner image from a local file path.
+	 */
+	async uploadArticleBannerImage(
+		imageFilePath: string,
+		serverUrl?: string,
+		signer?: NostrSigner | null
+	): Promise<string | null> {
+		try {
+			const path = normalizePath(imageFilePath);
+			let imageBuffer: ArrayBuffer | null = null;
+
+			// Check if file is in vault first
+			const abstractFile = this.app.vault.getAbstractFileByPath(path);
+			if (abstractFile instanceof TFile) {
+				imageBuffer = await this.app.vault.readBinary(abstractFile);
+			} else {
+				// Otherwise read directly from filesystem
+				imageBuffer = await FileSystemAdapter.readLocalFile(path);
+			}
+
+			if (!imageBuffer) {
+				new Notice("❌ Could not read banner image file.");
+				return null;
+			}
+
+			if (this.isFileSizeOverLimit(imageBuffer)) {
+				return null;
+			}
+
+			const mimeType = getMimeTypeFromFileName(path);
+			new Notice("⏳ Uploading Banner Image to Blossom server...");
+			const descriptor = await this.uploadBlob(imageBuffer, mimeType, serverUrl, signer);
+
+			if (descriptor && descriptor.url) {
+				return descriptor.url;
+			}
+		} catch (error) {
+			console.error(`Problem with banner image file upload:`, error);
+		}
+		return null;
+	}
+
+	/**
+	 * Uploads an array of vault image files to the Blossom media server and returns replacement URLs & imeta tags.
+	 */
+	async uploadImagesToStorageProvider(
+		imageFilePaths: string[],
+		serverUrl?: string,
+		signer?: NostrSigner | null
+	): Promise<ImageUploadBatchResult> {
+		const uploadResults: ImageUploadResultItem[] = [];
 		let success = true;
 
-		for (let imagePath of imageFilePaths) {
+		for (const imagePath of imageFilePaths) {
 			try {
-				let imageFile = this.app.vault.getAbstractFileByPath(imagePath)
+				const imageFile = this.app.vault.getAbstractFileByPath(imagePath);
 				if (imageFile instanceof TFile) {
-					let imageBinary = await this.app.vault.readBinary(imageFile);
+					const imageBinary = await this.app.vault.readBinary(imageFile);
 
 					if (this.isFileSizeOverLimit(imageBinary)) {
 						continue;
 					}
-					const formData = new FormData();
-					formData.append('file', new Blob([imageBinary]), imageFile.name);
 
-					//const requestUrlParams: RequestUrlParam = {
-					//	url: 'https://nostr.build/api/v2/upload/files',
-					//	method: 'POST',
-					//	body: formDataString,
-					//	headers: {
-					//		//	'Content-Type': 'multipart/form-data',
-					//	},
-					//}
+					const mimeType = getMimeTypeFromFileName(imageFile.name);
+					const descriptor = await this.uploadBlob(imageBinary, mimeType, serverUrl, signer);
 
-					// using axios has CORS problems....
-					// nostr.build allows Obsidian but other stroage providers may not 
-					// so need to use Obsidian's requestUrl method for future cases....
-					// sending formData is tricky using this api - see below
-					// https://github.com/ai-chen2050/obsidian-wechat-public-platform/blob/9fdecb96966eaafdd6cbac716ffa5da3fb8d4b2b/src/api.ts#L92
-					// or...
-					// https://github.com/gavvvr/obsidian-imgur-plugin/blob/main/src/uploader/imgur/ImgurAnonymousUploader.ts
-					let headers: Record<string, string> = {
-						'Content-Type': 'multipart/form-data',
-					};
-
-					if (this.premiumNIP98User) {
-						let base64encodedEventString = await nip98.getToken(ImageUploadService.UPLOAD_ENDPOINT, 'post',
-							(authEvent) => finalizeEvent(authEvent, Buffer.from(this.privateKey)), true);
-						headers['Authorization'] = base64encodedEventString;
-						new Notice("⏳ Uploading as premium user.")
-					}
-					const response = await axios.post('https://nostr.build/api/v2/upload/files', formData, {
-						headers: headers,
-					});
-					//let response = await requestUrl(requestUrlParams);
-					//const { data } = response.json();
-					const { data } = response;
-					if (Array.isArray(data.data) && data.data.length > 0) {
-						const result = {
+					if (descriptor && descriptor.url) {
+						const imeta = buildImetaTag(descriptor);
+						uploadResults.push({
 							filePath: imagePath,
 							stringToReplace: `![[${imageFile.name}]]`,
-							replacementStringURL: data.data[0].url,
-							uploadMetadata: data.data[0]
-						};
-						uploadResults.push(result);
-						new Notice(`✅ Uploaded ${imageFile.name}`)
+							replacementStringURL: descriptor.url,
+							imetaTag: imeta,
+							blobDescriptor: descriptor,
+						});
+						new Notice(`✅ Uploaded ${imageFile.name}`);
 					} else {
-						new Notice(`❌ Problem uploading ${imageFile.name}`)
+						new Notice(`❌ Problem uploading ${imageFile.name}`);
+						success = false;
 					}
-
 				}
 			} catch (error) {
-				new Notice(`❌ Problem uploading `)
-				console.error(`Problem with image file reading : ${error}`)
+				new Notice(`❌ Problem uploading image`);
+				console.error(`Problem uploading image ${imagePath}:`, error);
 				success = false;
 			}
-
 		}
+
 		return { success, results: uploadResults };
 	}
 
+	/**
+	 * Checks if file size exceeds the Blossom limit (100MB).
+	 */
 	isFileSizeOverLimit(file: ArrayBuffer): boolean {
-		let maxSizeInBytes = 10 * 1024 * 1024; // 10 MB
-		if (this.premiumNIP98User) {
-			maxSizeInBytes = 50 * 1024 * 1024; // 100MB
-		}
+		const maxSizeInBytes = 100 * 1024 * 1024; // 100 MB
 		if (file.byteLength > maxSizeInBytes) {
-			if (this.premiumNIP98User) {
-				new Notice('❌ 50 MB inline image limit. Will not upload.');
-				return true;
-			}
-			new Notice('❌ Inline image size exceeds the limit. Will not upload.');
+			new Notice("❌ Inline image size exceeds 100 MB limit. Will not upload.");
 			return true;
 		}
 		return false;
 	}
-
-	convertKeyToHex(value: string): string {
-		if (value && value.startsWith("nsec")) {
-			let decodedPrivateKey = nip19.decode(value);
-			return decodedPrivateKey.data as string;
-		}
-		if (value && value.startsWith("npub")) {
-			let decodedPublicKey = nip19.decode(value);
-			return decodedPublicKey.data as string;
-		}
-		return value;
-	}
 }
-
