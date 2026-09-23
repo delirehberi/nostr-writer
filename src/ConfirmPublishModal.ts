@@ -10,9 +10,11 @@ import {
 } from "obsidian";
 import NostrService from "./service/NostrService";
 import NostrWriterPlugin from "../main";
+import { extractFrontmatterTags, extractBodyHashtags, parseTagInput, normalizeTags } from "./utils/TagExtractor";
+import { extractSlug, slugify, validateSlug } from "./utils/SlugUtil";
+import DryRunPreviewModal from "./DryRunPreviewModal";
 
 export default class ConfirmPublishModal extends Modal {
-
 	plugin: NostrWriterPlugin;
 
 	constructor(
@@ -27,65 +29,129 @@ export default class ConfirmPublishModal extends Modal {
 
 	async onOpen() {
 		let { contentEl } = this;
+		contentEl.empty();
+		contentEl.addClass("publish-modal-content");
 
 		const frontmatter = this.app.metadataCache.getFileCache(this.file)?.frontmatter;
 
-		// TODO check out Progress Bar Component...
-
-		if(this.file.extension !== "md"){
-			new Notice("❌ Only markdown files can be published.")
-			this.close()
+		if (this.file.extension !== "md") {
+			new Notice("❌ Only markdown files can be published.");
+			this.close();
 			return;
 		}
 
-		const frontmatterRegex = /---\s*[\s\S]*?\s*---/g;
-		const content = (await this.app.vault.read(this.file)).replace(frontmatterRegex, "").trim();
+		const frontmatterRegex = /^---\s*[\s\S]*?\s*---\s*/;
+		const fullFileContent = await this.app.vault.read(this.file);
+		const content = fullFileContent.replace(frontmatterRegex, "").trim();
 
-		const noteWordCount = content.split(" ").length;
+		const noteWordCount = content.split(/\s+/).filter(Boolean).length;
 
-		let noteCategoryTags: string[] = [];
+		// Extract tags safely using TagExtractor
+		const frontmatterTags = extractFrontmatterTags(frontmatter);
+		const bodyHashtags = extractBodyHashtags(content);
+		let noteCategoryTags: string[] = normalizeTags([...frontmatterTags, ...bodyHashtags]);
 
-		const regex = /#\w+/g;
-		const matches = content.match(regex) || [];
-		const hashtags = matches.map((match: string) => match.slice(1));
+		const initialTitle = frontmatter?.title || this.file.basename;
+		const initialSummary = frontmatter?.summary || "";
+		let initialSlug = extractSlug(frontmatter, initialTitle);
 
-		const properties = {
-			title: frontmatter?.title || this.file.basename,
-			summary: frontmatter?.summary || "",
-			image: isValidURL(frontmatter?.image) ? frontmatter?.image : "",
-			tags: frontmatter?.tags || hashtags,
-		}
-
-		for (const tag of properties.tags) {
-			noteCategoryTags.push(tag);
-		}
-
-		contentEl.createEl("h2", { text: `Publish` });
+		contentEl.createEl("h2", { text: `Publish to Nostr` });
 		const titleContainer = contentEl.createEl("div");
 		titleContainer.addClass("publish-title-container");
-
 		titleContainer.createEl("p", { text: `${noteWordCount} words` });
 
+		// Title Section
 		contentEl.createEl("h6", { text: `Title` });
 		let titleText = new TextComponent(contentEl)
-			.setPlaceholder(`${properties.title}`)
-			.setValue(`${properties.title}`);
+			.setPlaceholder(initialTitle)
+			.setValue(initialTitle);
+		titleText.inputEl.setCssStyles({
+			width: "100%",
+			marginBottom: "10px",
+		});
 
+		// Slug Section (Mandatory d-tag)
+		contentEl.createEl("h6", { text: `Slug (Identifier)` });
+		const slugContainer = contentEl.createEl("div");
+		slugContainer.addClass("publish-title-container");
+		slugContainer.createEl("p", {
+			text: `Unique identifier used by Nostr clients for this article URL. Letters, numbers, hyphens, and underscores only.`,
+		});
+
+		let isSlugManuallyEdited = false;
+		let slugText = new TextComponent(contentEl)
+			.setPlaceholder("my-article-slug")
+			.setValue(initialSlug);
+		slugText.inputEl.setCssStyles({
+			width: "100%",
+			marginBottom: "5px",
+		});
+
+		const slugErrorEl = contentEl.createEl("div");
+		slugErrorEl.setCssStyles({
+			color: "var(--text-error, #e53935)",
+			fontSize: "12px",
+			marginBottom: "10px",
+			display: "none",
+		});
+
+		// Auto-sync slug from title if user has not manually edited slug
+		titleText.onChange((newTitle) => {
+			if (!isSlugManuallyEdited) {
+				const autoSlug = slugify(newTitle);
+				slugText.setValue(autoSlug);
+				updateSlugValidation();
+			}
+		});
+
+		slugText.inputEl.addEventListener("input", () => {
+			isSlugManuallyEdited = true;
+			updateSlugValidation();
+		});
+
+		// Tags Section
 		contentEl.createEl("h6", { text: `Tags` });
 		const tagContainer = contentEl.createEl("div");
 		tagContainer.addClass("publish-title-container");
-
 		tagContainer.createEl("p", {
-			text: `Tags (#tags) from your file are automatically added below. Add more to help people discover your work. Remove any by clicking the X. `,
+			text: `Tags from frontmatter and body (#tag) are listed below. Type tags (comma-separated) and press Enter to add. Click X to remove.`,
 		});
 
 		let tagsText = new TextComponent(contentEl).setPlaceholder(
-			`Add a tag here and press enter`
+			`Add tags here (e.g. tech, nostr, obsidian) and press Enter`
 		);
+
+		const pillsContainer = contentEl.createEl("div");
+		pillsContainer.addClass("pills-container");
+
+		function renderPills() {
+			pillsContainer.empty();
+			noteCategoryTags.forEach((tag) => {
+				const pillElement = createPillElement(tag);
+				pillsContainer.appendChild(pillElement);
+			});
+		}
+
+		function addTagsFromInput(inputVal: string) {
+			if (!inputVal || inputVal.trim() === "") return;
+			const parsed = parseTagInput(inputVal);
+			let addedCount = 0;
+			for (const tag of parsed) {
+				if (!noteCategoryTags.includes(tag)) {
+					noteCategoryTags.push(tag);
+					addedCount++;
+				}
+			}
+			if (addedCount > 0) {
+				renderPills();
+			}
+			tagsText.setValue("");
+		}
 
 		tagsText.inputEl.addEventListener("keydown", (event) => {
 			if (event.key === "Enter") {
-				addTagAsPill(tagsText.getValue());
+				event.preventDefault();
+				addTagsFromInput(tagsText.getValue());
 			}
 		});
 
@@ -93,51 +159,51 @@ export default class ConfirmPublishModal extends Modal {
 			width: "100%",
 			marginBottom: "10px",
 		});
+		tagsText.inputEl.addClass("features");
 
-		const pillsContainer = contentEl.createEl("div");
-		pillsContainer.addClass("pills-container");
-		noteCategoryTags.forEach((tag) => {
-			const pillElement = createPillElement(tag);
-			pillsContainer.appendChild(pillElement);
-		});
+		renderPills();
 
+		// Summary Section
 		contentEl.createEl("h6", { text: `Summary` });
 		let summaryText = new TextAreaComponent(contentEl)
 			.setPlaceholder("Optional brief summary of your article...")
-			.setValue(properties.summary);
+			.setValue(initialSummary);
+		summaryText.inputEl.setCssStyles({
+			width: "100%",
+			height: "75px",
+			marginBottom: "10px",
+		});
+		summaryText.inputEl.classList.add("publish-modal-input");
 
+		// Banner Image Section
 		let selectedBannerImage: any | null = null;
 
 		new Setting(contentEl)
 			.setName("Upload Banner Image")
-			.setDesc("Optional image to be shown alongside your articles title.")
+			.setDesc("Optional image to be shown alongside your article's title.")
 			.addButton((button) =>
 				button
 					.setButtonText("Upload")
 					.setIcon("upload")
 					.setTooltip("Upload an image file for your article banner.")
 					.onClick(async () => {
-						const input = document.createElement('input');
-						input.type = 'file';
+						const input = document.createElement("input");
+						input.type = "file";
 						input.multiple = false;
-
 						input.click();
 
-						input.addEventListener('change', async () => {
-							if (input.files !== null) {
+						input.addEventListener("change", async () => {
+							if (input.files !== null && input.files.length > 0) {
 								const file = input.files[0];
 								if (file) {
-									if (!file.type.startsWith('image/')) {
-										new Notice('❌ Invalid file type. Please upload an image.');
+									if (!file.type.startsWith("image/")) {
+										new Notice("❌ Invalid file type. Please upload an image.");
 										return;
 									}
 
-									let maxSizeInBytes = 10 * 1024 * 1024; // 10 MB
-									if (this.plugin.settings.premiumStorageEnabled) {
-										maxSizeInBytes = 100 * 1024 * 1024;
-									}
+									let maxSizeInBytes = 100 * 1024 * 1024; // 100 MB
 									if (file.size > maxSizeInBytes) {
-										new Notice('❌ File size exceeds the limit. Please upload a smaller image.');
+										new Notice("❌ File size exceeds 100 MB limit. Please upload a smaller image.");
 										return;
 									}
 									selectedBannerImage = file;
@@ -145,16 +211,14 @@ export default class ConfirmPublishModal extends Modal {
 									imagePreview.src = URL.createObjectURL(selectedBannerImage);
 									imagePreview.style.display = "block";
 									clearImageButton.style.display = "inline-block";
-
-
 									imageNameDiv.textContent = selectedBannerImage.name;
-									new Notice(`✅ Selected image : ${file.name}`);
+									imageNameDiv.style.display = "block";
+									new Notice(`✅ Selected banner image: ${file.name}`);
 								}
 							} else {
 								new Notice(`❗️ No file selected.`);
 							}
 						});
-
 					})
 			);
 
@@ -162,11 +226,16 @@ export default class ConfirmPublishModal extends Modal {
 		imagePreview.setCssStyles({
 			maxWidth: "100%",
 			display: "none",
+			marginBottom: "5px",
+			borderRadius: "4px",
 		});
 
 		const imageNameDiv = contentEl.createEl("div");
 		imageNameDiv.setCssStyles({
 			display: "none",
+			fontSize: "12px",
+			color: "var(--text-muted)",
+			marginBottom: "5px",
 		});
 
 		const clearImageButton = contentEl.createEl("div");
@@ -176,10 +245,10 @@ export default class ConfirmPublishModal extends Modal {
 			border: "none",
 			cursor: "pointer",
 			fontSize: "14px",
-			color: "red",
+			color: "var(--text-error, red)",
+			marginBottom: "10px",
 		});
-
-		clearImageButton.textContent = "❌ Remove image.";
+		clearImageButton.textContent = "❌ Remove image";
 
 		function clearSelectedImage() {
 			selectedBannerImage = null;
@@ -189,32 +258,14 @@ export default class ConfirmPublishModal extends Modal {
 			imageNameDiv.style.display = "none";
 			clearImageButton.style.display = "none";
 		}
-
 		clearImageButton.addEventListener("click", clearSelectedImage);
 
-
-		titleText.inputEl.setCssStyles({
-			width: "100%",
-			marginBottom: "10px",
-		});
-
-		summaryText.inputEl.setCssStyles({
-			width: "100%",
-			height: "75px",
-			marginBottom: "10px",
-		});
-
-		tagsText.inputEl.setCssStyles({
-			width: "100%",
-		});
-
-		tagsText.inputEl.addClass("features");
-
+		// Profile & Draft Settings
 		let selectedProfileKey = "default";
 		if (this.plugin.settings.profiles.length > 0 && this.plugin.settings.multipleProfilesEnabled) {
-			let x = new Setting(contentEl)
+			new Setting(contentEl)
 				.setName("Select Profile")
-				.setDesc("Select a profile to send this note from.")
+				.setDesc("Select a profile to publish this note from.")
 				.addDropdown((dropdown) => {
 					dropdown.addOption("default", "Default");
 					for (const { profileNickname } of this.plugin.settings.profiles) {
@@ -223,7 +274,7 @@ export default class ConfirmPublishModal extends Modal {
 					dropdown.setValue("default");
 					dropdown.onChange(async (value) => {
 						selectedProfileKey = value;
-						new Notice(`${selectedProfileKey} selected`);
+						new Notice(`👤 Profile '${selectedProfileKey}' selected`);
 					});
 				});
 		}
@@ -231,74 +282,233 @@ export default class ConfirmPublishModal extends Modal {
 		let publishAsDraft = false;
 		new Setting(contentEl)
 			.setName("Publish as a draft")
-			.setDesc("Nostr clients allow you to edit your drafts later.")
+			.setDesc("Draft notes (Kind 30024) can be edited in compatible Nostr clients.")
 			.addToggle((toggle) =>
 				toggle.setValue(false).onChange(async (value) => {
 					publishAsDraft = value;
 					if (publishAsDraft) {
-						new Notice(`🗒️ Publishing as a draft.`);
+						new Notice(`🗒️ Publishing as draft (Kind 30024).`);
 					} else {
-						new Notice(`📜 Publishing as final.`);
+						new Notice(`📜 Publishing as final (Kind 30023).`);
 					}
 				})
 			);
 
+		// ==========================================
+		// Collapsible "Publish Targets & Relays" Section
+		// ==========================================
+		const configuredRelays = this.nostrService.getAllConfiguredRelayUrls();
+		const selectedRelays = new Set<string>(configuredRelays);
+		const providers = this.plugin.settings.imageStorageProviders && this.plugin.settings.imageStorageProviders.length > 0
+			? this.plugin.settings.imageStorageProviders
+			: ["https://blossom.primal.net", "https://blossom.damus.io"];
+		let selectedStorageProvider = this.plugin.settings.selectedImageStorageProvider || providers[0];
+		if (!providers.includes(selectedStorageProvider)) {
+			selectedStorageProvider = providers[0];
+		}
+
+		const targetsSection = contentEl.createEl("details", { cls: "nostr-collapsible-section" });
+		targetsSection.open = false;
+
+		const targetsSummary = targetsSection.createEl("summary", { cls: "nostr-section-summary" });
+		function updateSummaryLabel() {
+			targetsSummary.setText(`⚙️ Publish Targets & Relays (${selectedRelays.size}/${configuredRelays.length} active)`);
+		}
+		updateSummaryLabel();
+
+		const targetsContent = targetsSection.createEl("div", { cls: "nostr-section-content" });
+
+		// Media Server Picker
+		new Setting(targetsContent)
+			.setName("Media / Blossom Server")
+			.setDesc("Active media host for article banner & images.")
+			.addDropdown((dropdown) => {
+				for (const p of providers) {
+					dropdown.addOption(p, p);
+				}
+				dropdown.setValue(selectedStorageProvider);
+				dropdown.onChange((val) => {
+					selectedStorageProvider = val;
+				});
+			});
+
+		// Relay Toggle Toolbar
+		const relayToolbar = targetsContent.createEl("div", { cls: "nostr-relay-toolbar" });
+		relayToolbar.createEl("span", { text: "Relays for this post:" });
+
+		const toolbarButtons = relayToolbar.createEl("div", { cls: "nostr-relay-quick-btns" });
+		const selectAllBtn = toolbarButtons.createEl("button", { text: "Select All", cls: "mod-small" });
+		const deselectAllBtn = toolbarButtons.createEl("button", { text: "Deselect All", cls: "mod-small" });
+
+		const relayListContainer = targetsContent.createEl("div", { cls: "nostr-relay-checkbox-list" });
+		const relayCheckboxes: { url: string; checkbox: HTMLInputElement }[] = [];
+
+		for (const rUrl of configuredRelays) {
+			const isConnected = this.nostrService.getRelayInfo(rUrl);
+			const row = relayListContainer.createEl("label", { cls: "nostr-relay-checkbox-row" });
+
+			const chk = row.createEl("input", { type: "checkbox" }) as HTMLInputElement;
+			chk.checked = selectedRelays.has(rUrl);
+			chk.addEventListener("change", () => {
+				if (chk.checked) {
+					selectedRelays.add(rUrl);
+				} else {
+					selectedRelays.delete(rUrl);
+				}
+				updateSummaryLabel();
+			});
+			relayCheckboxes.push({ url: rUrl, checkbox: chk });
+
+			const relayIcon = row.createEl("span", {
+				cls: "nostr-relay-icon",
+				text: "📡",
+			});
+
+			row.createEl("span", { cls: "nostr-relay-url-label", text: rUrl });
+		}
+
+		selectAllBtn.addEventListener("click", (e) => {
+			e.preventDefault();
+			for (const item of relayCheckboxes) {
+				item.checkbox.checked = true;
+				selectedRelays.add(item.url);
+			}
+			updateSummaryLabel();
+		});
+
+		deselectAllBtn.addEventListener("click", (e) => {
+			e.preventDefault();
+			for (const item of relayCheckboxes) {
+				item.checkbox.checked = false;
+			}
+			selectedRelays.clear();
+			updateSummaryLabel();
+		});
+
 		contentEl.createEl("hr");
 
-		let info = contentEl.createEl("p", {
-			text: `Are you sure you want to publish this note to Nostr?`,
-		});
-		info.addClass("publish-modal-info");
+		// Validation helper
+		function updateSlugValidation(): boolean {
+			const slugVal = slugText.getValue().trim();
+			const validation = validateSlug(slugVal);
+			if (!validation.isValid) {
+				slugErrorEl.setText(`⚠️ ${validation.error || "Slug is required."}`);
+				slugErrorEl.style.display = "block";
+				publishButton.setDisabled(true);
+				previewButton.setDisabled(true);
+				return false;
+			} else {
+				slugErrorEl.setText("");
+				slugErrorEl.style.display = "none";
+				publishButton.setDisabled(false);
+				previewButton.setDisabled(false);
+				return true;
+			}
+		}
 
-		let publishButton = new ButtonComponent(contentEl)
+		// Core publish function (shared by Confirm and Dry-Run modal)
+		const doPublish = async () => {
+			const currentSlug = slugText.getValue().trim();
+			const validation = validateSlug(currentSlug);
+			if (!validation.isValid) {
+				new Notice(`❌ ${validation.error || "A valid slug is required."}`);
+				updateSlugValidation();
+				return;
+			}
+
+			if (selectedRelays.size === 0) {
+				new Notice("❌ No target relays selected. Please enable at least one relay.");
+				return;
+			}
+
+			publishButton.setButtonText("Publishing...").setDisabled(true);
+			previewButton.setDisabled(true);
+
+			try {
+				const fileContent = content;
+				const title = titleText.getValue();
+				const summary = summaryText.getValue();
+				const targetRelaysArray = Array.from(selectedRelays);
+
+				const res = await this.nostrService.publishNote(
+					fileContent,
+					this.file,
+					summary,
+					selectedBannerImage && selectedBannerImage.path ? selectedBannerImage.path : null,
+					title,
+					noteCategoryTags,
+					selectedProfileKey,
+					publishAsDraft,
+					currentSlug,
+					targetRelaysArray,
+					selectedStorageProvider
+				);
+
+				if (res.success) {
+					new Notice(`✅ Successfully published note to Nostr!`);
+					for (let relay of res.publishedRelays) {
+						new Notice(`✅ - Sent to ${relay}`);
+					}
+					this.close();
+				} else {
+					new Notice(`❌ Failed to publish note to Nostr.`);
+				}
+			} catch (error: any) {
+				console.error("Publishing error:", error);
+				new Notice(`❌ Error publishing note: ${error.message || error}`);
+			} finally {
+				publishButton.setButtonText("Confirm and Publish").setDisabled(false);
+				previewButton.setDisabled(false);
+			}
+		};
+
+		// Button Bar Layout
+		const buttonContainer = contentEl.createEl("div", { cls: "nostr-publish-btn-container" });
+
+		const previewButton = new ButtonComponent(buttonContainer)
+			.setButtonText("🔍 Preview / Dry Run")
+			.onClick(() => {
+				const currentSlug = slugText.getValue().trim();
+				const validation = validateSlug(currentSlug);
+				if (!validation.isValid) {
+					new Notice(`❌ ${validation.error || "A valid slug is required for preview."}`);
+					updateSlugValidation();
+					return;
+				}
+
+				new DryRunPreviewModal(this.app, this.plugin, {
+					file: this.file,
+					title: titleText.getValue() || this.file.basename,
+					slug: currentSlug,
+					summary: summaryText.getValue(),
+					content: content,
+					tags: noteCategoryTags,
+					publishAsDraft: publishAsDraft,
+					selectedProfileKey: selectedProfileKey,
+					targetRelays: Array.from(selectedRelays),
+					selectedStorageProvider: selectedStorageProvider,
+					bannerImageUrl: selectedBannerImage ? selectedBannerImage.name : null,
+					onBroadcast: doPublish,
+				}).open();
+			});
+
+		const publishButton = new ButtonComponent(buttonContainer)
 			.setButtonText("Confirm and Publish")
 			.setCta()
 			.onClick(async () => {
-				if (confirm(`Are you sure you want to publish this note ${publishAsDraft ? "as a draft" : "publically"} to Nostr?`)) {
-					// Disable the button and change the text to show a loading state
-					publishButton.setButtonText("Publishing...").setDisabled(true);
-					setTimeout(async () => {
-						try {
-							const fileContent = content;
-							const title = titleText.getValue();
-							const summary = summaryText.getValue();
-							let res = await this.nostrService.publishNote(
-								fileContent,
-								this.file,
-								summary,
-								selectedBannerImage && selectedBannerImage.path ? selectedBannerImage.path : null,
-								title,
-								noteCategoryTags,
-								selectedProfileKey,
-								publishAsDraft
-							);
-							if (res.success) {
-								setTimeout(() => {
-									new Notice(`✅ Successfully sent note to Nostr.`);
-								}, 500);
-								for (let relay of res.publishedRelays) {
-									setTimeout(() => {
-										new Notice(`✅ - Sent to ${relay}`);
-									}, 500);
-								}
-							} else {
-								new Notice(`❌ Failed to send note to Nostr.`);
-							}
-						} catch (error) {
-							console.error(error);
-							new Notice(`❌ Failed to publish note to Nostr.`);
-						}
-						publishButton
-							.setButtonText("Confirm and Publish")
-							.setDisabled(false);
-						this.close();
-					}, 3000);
+				if (
+					confirm(
+						`Are you sure you want to publish this note ${
+							publishAsDraft ? "as a draft" : "publicly"
+						} to Nostr?`
+					)
+				) {
+					await doPublish();
 				}
 			});
 
-		contentEl.classList.add("publish-modal-content");
-		publishButton.buttonEl.classList.add("publish-modal-button");
-		summaryText.inputEl.classList.add("publish-modal-input");
+		// Initial slug validation
+		updateSlugValidation();
 
 		function createPillElement(tag: string) {
 			const pillElement = document.createElement("div");
@@ -317,22 +527,6 @@ export default class ConfirmPublishModal extends Modal {
 			pillElement.appendChild(deleteButton);
 			return pillElement;
 		}
-
-		function addTagAsPill(tag: string) {
-			if (tag.trim() === "") return;
-			noteCategoryTags.push(tag.trim());
-			const pillElement = createPillElement(tag.trim());
-			pillsContainer.appendChild(pillElement);
-			tagsText.setValue("");
-		}
 	}
 }
 
-function isValidURL(url: string) {
-	try {
-		new URL(url);
-		return true;
-	} catch (_) {
-		return false;
-	}
-}
