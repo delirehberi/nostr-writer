@@ -131,6 +131,7 @@ export class BunkerSigner implements NostrSigner {
 		
 		const requestedPerms = "sign_event,nip04_encrypt,nip04_decrypt,nip44_encrypt,nip44_decrypt,get_public_key,get_relays";
 		let initialConnectError: any = null;
+		let handshakeOk = false;
 
 		try {
 			// Send connect RPC with client pubkey and requested permissions
@@ -144,6 +145,7 @@ export class BunkerSigner implements NostrSigner {
 				`Connection to Bunker (${this.bunkerPointer.pubkey}) timed out after 35s. Please open Amber (or your bunker signer) and approve the connection request.`
 			);
 			this.isConnected = true;
+			handshakeOk = true;
 			Logger.info(`[BunkerSigner] Connected successfully via connect handshake!`);
 		} catch (error: any) {
 			initialConnectError = error;
@@ -160,6 +162,7 @@ export class BunkerSigner implements NostrSigner {
 					`Secondary connect handshake timed out.`
 				);
 				this.isConnected = true;
+				handshakeOk = true;
 				Logger.info(`[BunkerSigner] Connected via secondary handshake!`);
 			} catch (_) {
 				// If connect rejected (e.g. secret was one-time and already consumed, or Amber already paired), check get_public_key
@@ -173,8 +176,9 @@ export class BunkerSigner implements NostrSigner {
 				20000,
 				`Liveness check (get_public_key) timed out after 20s. Please ensure Amber / remote signer is running.`
 			);
-			if (typeof userPk === "string" && /^[0-9a-fA-F]{64}$/.test(userPk)) {
-				this.userPubkey = userPk.toLowerCase();
+			const parsedPk = BunkerSigner.parsePublicKeyResponse(userPk);
+			if (parsedPk) {
+				this.userPubkey = parsedPk;
 				this.isConnected = true;
 				Logger.info(`[BunkerSigner] Discovered user signing pubkey: ${this.userPubkey}`);
 			} else {
@@ -188,10 +192,31 @@ export class BunkerSigner implements NostrSigner {
 					`Bunker returned 'no permission'. Please open Amber (or your signer app) and make sure you approve the connection request for client app (${this.getClientNpub()}).`
 				);
 			}
+			if (handshakeOk) {
+				// Paired successfully but this bunker answers get_public_key in an unexpected way;
+				// keep going with the pointer pubkey. signEvent() adopts the real pubkey from the signed event.
+				Logger.warn(`[BunkerSigner] get_public_key unusable (${pkError.message || pkError}); continuing with bunker pointer pubkey`);
+				this.isConnected = true;
+				return this.remoteSigner;
+			}
 			throw new Error(`Failed to connect to remote bunker (${this.bunkerPointer.pubkey}): ${pkError.message || initialConnectError?.message || pkError}`);
 		}
 
 		return this.remoteSigner;
+	}
+
+	/** Accepts a 64-char hex pubkey or an npub; returns lowercase hex, or null for anything else (e.g. "ack"). */
+	private static parsePublicKeyResponse(res: unknown): string | null {
+		if (typeof res !== "string") return null;
+		const v = res.trim();
+		if (/^[0-9a-fA-F]{64}$/.test(v)) return v.toLowerCase();
+		if (v.startsWith("npub1")) {
+			try {
+				const d = decode(v);
+				if (d.type === "npub" && typeof d.data === "string") return d.data;
+			} catch (_) {}
+		}
+		return null;
 	}
 
 	public getType(): SignerType {
@@ -271,7 +296,7 @@ export class BunkerSigner implements NostrSigner {
 		try {
 			const signer = await this.ensureConnected();
 			const res = await (signer as any).sendRequest("get_public_key", []);
-			return typeof res === "string" && /^[0-9a-fA-F]{64}$/.test(res);
+			return BunkerSigner.parsePublicKeyResponse(res) !== null;
 		} catch (e: any) {
 			Logger.error("Bunker liveness check failed:", e.message || e);
 			return false;
