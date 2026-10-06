@@ -95,7 +95,11 @@ export default class DryRunPreviewModal extends Modal {
 
 		// Header
 		const header = contentEl.createEl("div", { cls: "dry-run-header" });
-		header.createEl("h2", { text: "🔍 Event Preview & Dry Run" });
+		header.createEl("h2", { text: "🔍 Unsigned Event Preview & Dry Run" });
+		header.createEl("p", {
+			cls: "dry-run-preview-note",
+			text: "This is a preview built from the event template. The real id and sig are computed when the event is signed, so the published event will differ in those fields.",
+		});
 
 		// Metadata Overview Cards
 		const summaryGrid = contentEl.createEl("div", { cls: "dry-run-summary-grid" });
@@ -148,7 +152,7 @@ export default class DryRunPreviewModal extends Modal {
 		}
 
 		// Formatted JSON Container
-		contentEl.createEl("h4", { text: "Raw Nostr Event JSON" });
+		contentEl.createEl("h4", { text: "Unsigned Event Template (JSON)" });
 		const jsonWrapper = contentEl.createEl("div", { cls: "dry-run-json-container" });
 		const jsonPre = jsonWrapper.createEl("pre", { cls: "dry-run-json-pre" });
 		const formattedJson = JSON.stringify(this.previewEvent, null, 2);

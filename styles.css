@@ -554,3 +554,9 @@
     align-items: center;
 }
 
+
+.dry-run-preview-note {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	margin: 4px 0 0;
+}
