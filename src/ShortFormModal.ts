@@ -89,6 +89,7 @@ export default class ShortFormModal extends Modal {
 
 			const chk = row.createEl("input", { type: "checkbox" }) as HTMLInputElement;
 			chk.checked = selectedRelays.has(rUrl);
+			relayCheckboxes.push({ url: rUrl, checkbox: chk });
 			chk.addEventListener("change", () => {
 				if (chk.checked) {
 					selectedRelays.add(rUrl);
