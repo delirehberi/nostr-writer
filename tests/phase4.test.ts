@@ -14,6 +14,7 @@ import {
 } from "../src/utils/RelayUtil";
 import { NsecSigner } from "../src/signer/NsecSigner";
 import { verifyEvent } from "nostr-tools/pure";
+import { Logger } from "../src/utils/Logger";
 
 console.log("==========================================");
 console.log("RUNNING PHASE 4 UNIT TESTS");
@@ -193,6 +194,25 @@ async function runTests() {
 	]);
 	console.log("  ✅ PASS: Relay URL normalization, validation, and list deduplication");
 	passed += 3;
+
+	// Logger redaction
+	{
+		const nsec = "nsec1" + "q".repeat(58);
+		const origLog = console.log, origErr = console.error;
+		console.log = () => {};
+		console.error = () => {};
+		Logger.clear();
+		Logger.info(`key ${nsec}`, { privateKey: "abcd", note: `bunker://pk?relay=wss://r&secret=hunter2` });
+		Logger.error("fail", new Error(`bad ${nsec}`));
+		console.log = origLog;
+		console.error = origErr;
+		const dump = Logger.getFormattedLogs();
+		assert.ok(!dump.includes(nsec), "nsec leaked in logs");
+		assert.ok(!dump.includes("hunter2"), "bunker secret leaked in logs");
+		assert.ok(!dump.includes("abcd"), "privateKey field leaked in logs");
+		console.log("  ✅ PASS: Logger redacts nsec keys, secret params and sensitive fields");
+		passed += 1;
+	}
 
 	console.log("\n==========================================");
 	console.log(`TEST RESULTS: ${passed} passed, ${failed} failed`);

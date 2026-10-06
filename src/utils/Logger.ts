@@ -10,6 +10,31 @@ export interface LogEntry {
 	details?: any;
 }
 
+const SENSITIVE_KEY = /(priv(ate)?key|secret|nsec|password|token)/i;
+
+/** Masks nsec keys and `secret=` URI params in a string. */
+export function redactString(input: string): string {
+	return input
+		.replace(/nsec1[023456789acdefghjklmnpqrstuvwxyz]{20,}/gi, "nsec1[REDACTED]")
+		.replace(/([?&]secret=)[^&\s"']*/gi, "$1[REDACTED]");
+}
+
+/** Deep-copies a value for logging with secrets masked; Errors become strings. */
+export function redactSecrets(value: any, depth = 0): any {
+	if (value === null || value === undefined) return value;
+	if (typeof value === "string") return redactString(value);
+	if (value instanceof Error) return redactString(value.stack || `${value.name}: ${value.message}`);
+	if (typeof value !== "object") return value;
+	if (depth > 6) return "[Truncated]";
+	if (Array.isArray(value)) return value.map((v) => redactSecrets(v, depth + 1));
+	if (value instanceof Uint8Array) return "[REDACTED bytes]";
+	const out: Record<string, any> = {};
+	for (const [k, v] of Object.entries(value)) {
+		out[k] = SENSITIVE_KEY.test(k) && v ? "[REDACTED]" : redactSecrets(v, depth + 1);
+	}
+	return out;
+}
+
 export class Logger {
 	private static readonly MAX_ENTRIES = 100;
 	private static logs: LogEntry[] = [];
@@ -21,6 +46,8 @@ export class Logger {
 	}
 
 	public static log(message: string, details?: any): void {
+		message = redactString(message);
+		details = redactSecrets(details);
 		Logger.addEntry("info", message, details);
 		if (details !== undefined) {
 			console.log(`[NostrWriter] ${message}`, details);
@@ -34,6 +61,8 @@ export class Logger {
 	}
 
 	public static warn(message: string, details?: any): void {
+		message = redactString(message);
+		details = redactSecrets(details);
 		Logger.addEntry("warn", message, details);
 		if (details !== undefined) {
 			console.warn(`[NostrWriter] ⚠️ ${message}`, details);
@@ -43,6 +72,8 @@ export class Logger {
 	}
 
 	public static error(message: string, details?: any): void {
+		message = redactString(message);
+		details = redactSecrets(details);
 		Logger.addEntry("error", message, details);
 		if (details !== undefined) {
 			console.error(`[NostrWriter] ❌ ${message}`, details);
@@ -52,6 +83,8 @@ export class Logger {
 	}
 
 	public static debug(message: string, details?: any): void {
+		message = redactString(message);
+		details = redactSecrets(details);
 		Logger.addEntry("debug", message, details);
 		if (details !== undefined) {
 			console.debug(`[NostrWriter] 🔍 ${message}`, details);
