@@ -36,6 +36,7 @@ export interface NostrWriterPluginSettings {
 	imageStorageProviders: string[];
 	selectedImageStorageProvider: string;
 	premiumStorageEnabled: boolean;
+	developerMode: boolean;
 }
 
 export class NostrWriterSettingTab extends PluginSettingTab {
@@ -53,8 +54,6 @@ export class NostrWriterSettingTab extends PluginSettingTab {
 	display(): void {
 		let { containerEl } = this;
 		containerEl.empty();
-
-		containerEl.createEl("h2", { text: "Nostr Writer Settings" });
 
 		// Primary Profile / Signer Configuration
 		containerEl.createEl("h4", { text: "Default Publishing Identity" });
@@ -86,7 +85,7 @@ export class NostrWriterSettingTab extends PluginSettingTab {
 			.setDesc(
 				isNsec
 					? "Enter your nsec1... or 64-character hex private key."
-					: "Enter bunker://... or nostrconnect://... URI or NIP-05 identifier."
+					: "Paste the bunker:// connection URL from your signer app (Amber, nsec.app, ...), then press Connect. See the README for how to get it."
 			)
 			.addText((text) => {
 				signerTargetInput = text;
@@ -95,24 +94,58 @@ export class NostrWriterSettingTab extends PluginSettingTab {
 					.setPlaceholder(isNsec ? "nsec1..." : "bunker://<pubkey>?relay=wss://...&secret=...")
 					.setValue(currentVal)
 					.onChange(async (value) => {
+						// Remote signers need a network lookup, so they are saved with the Connect button.
+						if (!isNsec) return;
 						const trimmed = value.trim();
-						const isValid = await SignerFactory.isValidSignerConfig(signerType, trimmed);
-						if (isValid) {
+						if (await SignerFactory.isValidSignerConfig(signerType, trimmed)) {
 							this.plugin.settings.signerTarget = trimmed;
-							if (signerType === "nsec") {
-								this.plugin.settings.privateKey = trimmed;
-							}
+							this.plugin.settings.privateKey = trimmed;
 							await this.plugin.saveSettings();
 							await this.plugin.startupNostrService();
-							new Notice(isNsec ? "Private key saved!" : "Bunker connection saved!");
+							new Notice("Private key saved!");
 						} else {
-							new Notice(isNsec ? "Invalid private key (expected nsec1...)" : "Invalid Bunker URI / identifier", 5000);
+							new Notice("Invalid private key (expected nsec1...)", 5000);
 						}
 					});
 
 				signerTargetField = text.inputEl;
 				signerTargetField.type = isNsec ? "password" : "text";
 				signerTargetField.style.width = "400px";
+			})
+			.addButton((button) => {
+				if (isNsec) {
+					button.buttonEl.hide();
+					return;
+				}
+				button
+					.setButtonText("Connect")
+					.setCta()
+					.setTooltip("Check and save this remote signer connection")
+					.onClick(async () => {
+						const trimmed = (signerTargetField?.value || "").trim();
+						if (!trimmed) {
+							new Notice("❌ Paste a bunker:// connection URL first.", 6000);
+							return;
+						}
+						button.setDisabled(true).setButtonText("Checking...");
+						try {
+							if (await SignerFactory.isValidSignerConfig("bunker", trimmed)) {
+								this.plugin.settings.signerTarget = trimmed;
+								await this.plugin.saveSettings();
+								await this.plugin.startupNostrService();
+								new Notice("✅ Bunker connection saved. Approve the request in your signer app if prompted.", 6000);
+							} else if (trimmed.includes("@") && !trimmed.includes("://")) {
+								new Notice(
+									`❌ '${trimmed}' is a normal NIP-05 address, not a signer connection. Copy the bunker:// URL from your signer app instead.`,
+									10000
+								);
+							} else {
+								new Notice("❌ Invalid connection. It should look like bunker://<pubkey>?relay=wss://...", 8000);
+							}
+						} finally {
+							button.setDisabled(false).setButtonText("Connect");
+						}
+					});
 			})
 			.addButton((button) =>
 				button
@@ -515,6 +548,16 @@ export class NostrWriterSettingTab extends PluginSettingTab {
 		// Debug Logs & Diagnostics
 		// ==========================================
 		containerEl.createEl("h4", { text: "Debug Logs & Diagnostics" });
+
+		new Setting(containerEl)
+			.setName("Developer mode")
+			.setDesc("Show advanced options: target relay selection for short notes and the Preview / Dry Run button in publish dialogs.")
+			.addToggle((toggle) => {
+				toggle.setValue(this.plugin.settings.developerMode).onChange(async (value) => {
+					this.plugin.settings.developerMode = value;
+					await this.plugin.saveSettings();
+				});
+			});
 
 		const logSetting = new Setting(this.containerEl)
 			.setName("Diagnostic Logs")
