@@ -492,6 +492,11 @@ export default class ConfirmPublishModal extends Modal {
 				}).open();
 			});
 
+		// Dry run is a developer tool, only shown in developer mode.
+		if (!this.plugin.settings.developerMode) {
+			previewButton.buttonEl.hide();
+		}
+
 		const publishButton = new ButtonComponent(buttonContainer)
 			.setButtonText("Confirm and Publish")
 			.setCta()

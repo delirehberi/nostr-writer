@@ -519,7 +519,7 @@ export class NostrWriterSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Developer mode")
-			.setDesc("Show advanced options, such as choosing target relays for each short note.")
+			.setDesc("Show advanced options: target relay selection for short notes and the Preview / Dry Run button in publish dialogs.")
 			.addToggle((toggle) => {
 				toggle.setValue(this.plugin.settings.developerMode).onChange(async (value) => {
 					this.plugin.settings.developerMode = value;
