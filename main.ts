@@ -222,6 +222,7 @@ export default class NostrWriterPlugin extends Plugin {
 				],
 				selectedImageStorageProvider: "https://blossom.primal.net",
 				premiumStorageEnabled: false,
+				developerMode: false,
 				multipleProfilesEnabled: false,
 				profiles: [],
 			},

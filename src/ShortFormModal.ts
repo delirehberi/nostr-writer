@@ -58,71 +58,73 @@ export default class ShortFormModal extends Modal {
 				});
 		}
 
-		// Collapsible Relay Selection
+		// Relay selection is an advanced option, only shown in developer mode.
 		const configuredRelays = this.nostrService.getAllConfiguredRelayUrls();
 		const selectedRelays = new Set<string>(configuredRelays);
 
-		const targetsSection = contentEl.createEl("details", { cls: "nostr-collapsible-section" });
-		targetsSection.open = false;
+		if (this.plugin.settings.developerMode) {
+			const targetsSection = contentEl.createEl("details", { cls: "nostr-collapsible-section" });
+			targetsSection.open = false;
 
-		const targetsSummary = targetsSection.createEl("summary", { cls: "nostr-section-summary" });
-		function updateSummaryLabel() {
-			targetsSummary.setText(`⚙️ Publish Targets & Relays (${selectedRelays.size}/${configuredRelays.length} active)`);
-		}
-		updateSummaryLabel();
+			const targetsSummary = targetsSection.createEl("summary", { cls: "nostr-section-summary" });
+			function updateSummaryLabel() {
+				targetsSummary.setText(`⚙️ Publish Targets & Relays (${selectedRelays.size}/${configuredRelays.length} active)`);
+			}
+			updateSummaryLabel();
 
-		const targetsContent = targetsSection.createEl("div", { cls: "nostr-section-content" });
+			const targetsContent = targetsSection.createEl("div", { cls: "nostr-section-content" });
 
-		const relayToolbar = targetsContent.createEl("div", { cls: "nostr-relay-toolbar" });
-		relayToolbar.createEl("span", { text: "Relays for this note:" });
+			const relayToolbar = targetsContent.createEl("div", { cls: "nostr-relay-toolbar" });
+			relayToolbar.createEl("span", { text: "Relays for this note:" });
 
-		const toolbarButtons = relayToolbar.createEl("div", { cls: "nostr-relay-quick-btns" });
-		const selectAllBtn = toolbarButtons.createEl("button", { text: "Select All", cls: "mod-small" });
-		const deselectAllBtn = toolbarButtons.createEl("button", { text: "Deselect All", cls: "mod-small" });
+			const toolbarButtons = relayToolbar.createEl("div", { cls: "nostr-relay-quick-btns" });
+			const selectAllBtn = toolbarButtons.createEl("button", { text: "Select All", cls: "mod-small" });
+			const deselectAllBtn = toolbarButtons.createEl("button", { text: "Deselect All", cls: "mod-small" });
 
-		const relayListContainer = targetsContent.createEl("div", { cls: "nostr-relay-checkbox-list" });
-		const relayCheckboxes: { url: string; checkbox: HTMLInputElement }[] = [];
+			const relayListContainer = targetsContent.createEl("div", { cls: "nostr-relay-checkbox-list" });
+			const relayCheckboxes: { url: string; checkbox: HTMLInputElement }[] = [];
 
-		for (const rUrl of configuredRelays) {
-			const isConnected = this.nostrService.getRelayInfo(rUrl);
-			const row = relayListContainer.createEl("label", { cls: "nostr-relay-checkbox-row" });
+			for (const rUrl of configuredRelays) {
+				const isConnected = this.nostrService.getRelayInfo(rUrl);
+				const row = relayListContainer.createEl("label", { cls: "nostr-relay-checkbox-row" });
 
-			const chk = row.createEl("input", { type: "checkbox" }) as HTMLInputElement;
-			chk.checked = selectedRelays.has(rUrl);
-			relayCheckboxes.push({ url: rUrl, checkbox: chk });
-			chk.addEventListener("change", () => {
-				if (chk.checked) {
-					selectedRelays.add(rUrl);
-				} else {
-					selectedRelays.delete(rUrl);
+				const chk = row.createEl("input", { type: "checkbox" }) as HTMLInputElement;
+				chk.checked = selectedRelays.has(rUrl);
+				relayCheckboxes.push({ url: rUrl, checkbox: chk });
+				chk.addEventListener("change", () => {
+					if (chk.checked) {
+						selectedRelays.add(rUrl);
+					} else {
+						selectedRelays.delete(rUrl);
+					}
+					updateSummaryLabel();
+				});
+				const relayIcon = row.createEl("span", {
+					cls: "nostr-relay-icon",
+					text: "📡",
+				});
+
+				row.createEl("span", { cls: "nostr-relay-url-label", text: rUrl });
+			}
+
+			selectAllBtn.addEventListener("click", (e) => {
+				e.preventDefault();
+				for (const item of relayCheckboxes) {
+					item.checkbox.checked = true;
+					selectedRelays.add(item.url);
 				}
 				updateSummaryLabel();
 			});
-			const relayIcon = row.createEl("span", {
-				cls: "nostr-relay-icon",
-				text: "📡",
+
+			deselectAllBtn.addEventListener("click", (e) => {
+				e.preventDefault();
+				for (const item of relayCheckboxes) {
+					item.checkbox.checked = false;
+				}
+				selectedRelays.clear();
+				updateSummaryLabel();
 			});
-
-			row.createEl("span", { cls: "nostr-relay-url-label", text: rUrl });
 		}
-
-		selectAllBtn.addEventListener("click", (e) => {
-			e.preventDefault();
-			for (const item of relayCheckboxes) {
-				item.checkbox.checked = true;
-				selectedRelays.add(item.url);
-			}
-			updateSummaryLabel();
-		});
-
-		deselectAllBtn.addEventListener("click", (e) => {
-			e.preventDefault();
-			for (const item of relayCheckboxes) {
-				item.checkbox.checked = false;
-			}
-			selectedRelays.clear();
-			updateSummaryLabel();
-		});
 
 		contentEl.createEl("hr");
 

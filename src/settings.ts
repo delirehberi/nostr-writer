@@ -36,6 +36,7 @@ export interface NostrWriterPluginSettings {
 	imageStorageProviders: string[];
 	selectedImageStorageProvider: string;
 	premiumStorageEnabled: boolean;
+	developerMode: boolean;
 }
 
 export class NostrWriterSettingTab extends PluginSettingTab {
@@ -515,6 +516,16 @@ export class NostrWriterSettingTab extends PluginSettingTab {
 		// Debug Logs & Diagnostics
 		// ==========================================
 		containerEl.createEl("h4", { text: "Debug Logs & Diagnostics" });
+
+		new Setting(containerEl)
+			.setName("Developer mode")
+			.setDesc("Show advanced options, such as choosing target relays for each short note.")
+			.addToggle((toggle) => {
+				toggle.setValue(this.plugin.settings.developerMode).onChange(async (value) => {
+					this.plugin.settings.developerMode = value;
+					await this.plugin.saveSettings();
+				});
+			});
 
 		const logSetting = new Setting(this.containerEl)
 			.setName("Diagnostic Logs")
