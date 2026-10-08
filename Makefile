@@ -38,7 +38,7 @@ clean:
 # SemVer Versioning & Release Automation
 define bump_version
 	@echo "Running tests before version bump..."
-	@NEW_VER=$$(npm version $(1) --no-git-tag-version) && \
+	@NEW_VER=$$(npm version $(1) --no-git-tag-version --ignore-scripts) && \
 	node version-bump.mjs && \
 	git add package.json package-lock.json manifest.json versions.json && \
 	git commit -m "chore(release): $$NEW_VER" && \
