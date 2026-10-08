@@ -77,8 +77,24 @@ On Nostr you can write messages specifically tagged as "long-form". This tool pu
 ### Short-Form Content
 This tool focuses on publishing full .md files in the long-form from Obsidian. However, if you've got a short message to send out there - an idea or a quip - just toggle on short-form writer in settings; this will give you a place to write a message and send.
 ***
+### Setting up a Remote Signer (NIP-46)
+A remote signer is an app that holds your private key and signs on request, so the key never has to be stored in Obsidian. This is the safest way to use the plugin.
+
+1. Use a signer app that supports NIP-46 / "bunker" connections, for example [Amber](https://github.com/greenart7c3/Amber) (Android) or [nsec.app](https://nsec.app) (web), and create or import your key there.
+2. In the signer app, look for an option like *Connect app*, *Bunker* or *NIP-46* and copy the connection URL it gives you. It looks like this:
+   ```
+   bunker://<signer-public-key>?relay=wss://relay.example.com&secret=<one-time-secret>
+   ```
+   - `<signer-public-key>`: the signer's key (64-character hex, or `npub1...`)
+   - `relay`: the relay your signer listens on. There can be several `relay=` entries.
+   - `secret`: an optional one-time code. If a connection fails, generate a fresh URL.
+3. In Obsidian go to Settings -> Nostr Writer, set **Signer Type** to Remote Bunker (NIP-46), and paste the URL into the connection field.
+4. Approve the request in your signer app when it appears. Every publish is then signed in the signer app.
+
+> A plain NIP-05 address like `you@example.com` is not a bunker URL. Use the `bunker://` URL from your signer app.
+
 ### Security Notice
-This plugin stores your private key within your local Obsidian settings file, specifically in:
+If you use a remote signer (above), your private key is not stored by this plugin. If you use a local private key instead, this plugin stores your private key within your local Obsidian settings file, specifically in:
 ```
 <Vault Directory>/.obsidian/plugins/nostr-writer/data.json
 ```
