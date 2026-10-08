@@ -307,83 +307,86 @@ export default class ConfirmPublishModal extends Modal {
 			selectedStorageProvider = providers[0];
 		}
 
-		const targetsSection = contentEl.createEl("details", { cls: "nostr-collapsible-section" });
-		targetsSection.open = false;
+		// Publish targets (relays, media server) are advanced options, only shown in developer mode.
+		if (this.plugin.settings.developerMode) {
+			const targetsSection = contentEl.createEl("details", { cls: "nostr-collapsible-section" });
+			targetsSection.open = false;
 
-		const targetsSummary = targetsSection.createEl("summary", { cls: "nostr-section-summary" });
-		function updateSummaryLabel() {
-			targetsSummary.setText(`⚙️ Publish Targets & Relays (${selectedRelays.size}/${configuredRelays.length} active)`);
-		}
-		updateSummaryLabel();
+			const targetsSummary = targetsSection.createEl("summary", { cls: "nostr-section-summary" });
+			function updateSummaryLabel() {
+				targetsSummary.setText(`⚙️ Publish Targets & Relays (${selectedRelays.size}/${configuredRelays.length} active)`);
+			}
+			updateSummaryLabel();
 
-		const targetsContent = targetsSection.createEl("div", { cls: "nostr-section-content" });
+			const targetsContent = targetsSection.createEl("div", { cls: "nostr-section-content" });
 
-		// Media Server Picker
-		new Setting(targetsContent)
-			.setName("Media / Blossom Server")
-			.setDesc("Active media host for article banner & images.")
-			.addDropdown((dropdown) => {
-				for (const p of providers) {
-					dropdown.addOption(p, p);
-				}
-				dropdown.setValue(selectedStorageProvider);
-				dropdown.onChange((val) => {
-					selectedStorageProvider = val;
+			// Media Server Picker
+			new Setting(targetsContent)
+				.setName("Media / Blossom Server")
+				.setDesc("Active media host for article banner & images.")
+				.addDropdown((dropdown) => {
+					for (const p of providers) {
+						dropdown.addOption(p, p);
+					}
+					dropdown.setValue(selectedStorageProvider);
+					dropdown.onChange((val) => {
+						selectedStorageProvider = val;
+					});
 				});
-			});
 
-		// Relay Toggle Toolbar
-		const relayToolbar = targetsContent.createEl("div", { cls: "nostr-relay-toolbar" });
-		relayToolbar.createEl("span", { text: "Relays for this post:" });
+			// Relay Toggle Toolbar
+			const relayToolbar = targetsContent.createEl("div", { cls: "nostr-relay-toolbar" });
+			relayToolbar.createEl("span", { text: "Relays for this post:" });
 
-		const toolbarButtons = relayToolbar.createEl("div", { cls: "nostr-relay-quick-btns" });
-		const selectAllBtn = toolbarButtons.createEl("button", { text: "Select All", cls: "mod-small" });
-		const deselectAllBtn = toolbarButtons.createEl("button", { text: "Deselect All", cls: "mod-small" });
+			const toolbarButtons = relayToolbar.createEl("div", { cls: "nostr-relay-quick-btns" });
+			const selectAllBtn = toolbarButtons.createEl("button", { text: "Select All", cls: "mod-small" });
+			const deselectAllBtn = toolbarButtons.createEl("button", { text: "Deselect All", cls: "mod-small" });
 
-		const relayListContainer = targetsContent.createEl("div", { cls: "nostr-relay-checkbox-list" });
-		const relayCheckboxes: { url: string; checkbox: HTMLInputElement }[] = [];
+			const relayListContainer = targetsContent.createEl("div", { cls: "nostr-relay-checkbox-list" });
+			const relayCheckboxes: { url: string; checkbox: HTMLInputElement }[] = [];
 
-		for (const rUrl of configuredRelays) {
-			const isConnected = this.nostrService.getRelayInfo(rUrl);
-			const row = relayListContainer.createEl("label", { cls: "nostr-relay-checkbox-row" });
+			for (const rUrl of configuredRelays) {
+				const isConnected = this.nostrService.getRelayInfo(rUrl);
+				const row = relayListContainer.createEl("label", { cls: "nostr-relay-checkbox-row" });
 
-			const chk = row.createEl("input", { type: "checkbox" }) as HTMLInputElement;
-			chk.checked = selectedRelays.has(rUrl);
-			chk.addEventListener("change", () => {
-				if (chk.checked) {
-					selectedRelays.add(rUrl);
-				} else {
-					selectedRelays.delete(rUrl);
+				const chk = row.createEl("input", { type: "checkbox" }) as HTMLInputElement;
+				chk.checked = selectedRelays.has(rUrl);
+				chk.addEventListener("change", () => {
+					if (chk.checked) {
+						selectedRelays.add(rUrl);
+					} else {
+						selectedRelays.delete(rUrl);
+					}
+					updateSummaryLabel();
+				});
+				relayCheckboxes.push({ url: rUrl, checkbox: chk });
+
+				const relayIcon = row.createEl("span", {
+					cls: "nostr-relay-icon",
+					text: "📡",
+				});
+
+				row.createEl("span", { cls: "nostr-relay-url-label", text: rUrl });
+			}
+
+			selectAllBtn.addEventListener("click", (e) => {
+				e.preventDefault();
+				for (const item of relayCheckboxes) {
+					item.checkbox.checked = true;
+					selectedRelays.add(item.url);
 				}
 				updateSummaryLabel();
 			});
-			relayCheckboxes.push({ url: rUrl, checkbox: chk });
 
-			const relayIcon = row.createEl("span", {
-				cls: "nostr-relay-icon",
-				text: "📡",
+			deselectAllBtn.addEventListener("click", (e) => {
+				e.preventDefault();
+				for (const item of relayCheckboxes) {
+					item.checkbox.checked = false;
+				}
+				selectedRelays.clear();
+				updateSummaryLabel();
 			});
-
-			row.createEl("span", { cls: "nostr-relay-url-label", text: rUrl });
 		}
-
-		selectAllBtn.addEventListener("click", (e) => {
-			e.preventDefault();
-			for (const item of relayCheckboxes) {
-				item.checkbox.checked = true;
-				selectedRelays.add(item.url);
-			}
-			updateSummaryLabel();
-		});
-
-		deselectAllBtn.addEventListener("click", (e) => {
-			e.preventDefault();
-			for (const item of relayCheckboxes) {
-				item.checkbox.checked = false;
-			}
-			selectedRelays.clear();
-			updateSummaryLabel();
-		});
 
 		contentEl.createEl("hr");
 
