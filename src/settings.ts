@@ -55,8 +55,6 @@ export class NostrWriterSettingTab extends PluginSettingTab {
 		let { containerEl } = this;
 		containerEl.empty();
 
-		containerEl.createEl("h2", { text: "Nostr Writer Settings" });
-
 		// Primary Profile / Signer Configuration
 		containerEl.createEl("h4", { text: "Default Publishing Identity" });
 
