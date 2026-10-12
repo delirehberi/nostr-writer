@@ -1,0 +1,290 @@
+<title>cal.emre.xyz Identity</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* Layout: one calm column of sections; logo concepts in a 3-up grid, wireframes side by side (before / after). */
+:root{
+  --paper:#fafaf9;
+  --card:#ffffff;
+  --ink:#1c1917;
+  --muted:#78716c;
+  --line:#e7e5e4;
+  --slot:#10b981;      /* availability green, already used for calendar dots */
+  --nostr:#8b5cf6;     /* nostr purple, already used for the community badge */
+  --tile:#1c1917;
+  --tile-fg:#fafaf9;
+  --f-display:'Bricolage Grotesque','Helvetica Neue',Arial,sans-serif;
+  --f-body:'Instrument Sans','Helvetica Neue',Arial,sans-serif;
+  --f-mono:'JetBrains Mono',ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#141210;--card:#1c1917;--ink:#f5f5f4;--muted:#a8a29e;--line:#2e2a27;
+    --slot:#34d399;--nostr:#a78bfa;--tile:#f5f5f4;--tile-fg:#1c1917;color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#141210;--card:#1c1917;--ink:#f5f5f4;--muted:#a8a29e;--line:#2e2a27;
+  --slot:#34d399;--nostr:#a78bfa;--tile:#f5f5f4;--tile-fg:#1c1917;color-scheme:dark;
+}
+body{background:var(--paper);color:var(--ink);font-family:var(--f-body);font-size:15px;line-height:1.6;padding-inline:20px;padding-block:48px 80px}
+.wrap{max-width:1040px;margin-inline:auto;display:flex;flex-direction:column;gap:72px}
+h1,h2,h3{font-family:var(--f-display);text-wrap:balance;margin:0;letter-spacing:-.02em}
+h1{font-size:clamp(2rem,5vw,3.25rem);line-height:1.05;font-weight:800}
+h2{font-size:1.75rem;font-weight:700;line-height:1.15}
+h3{font-size:1.1rem;font-weight:700}
+p{margin:0;max-width:65ch}
+.lede{color:var(--muted);font-size:1.05rem;margin-top:14px}
+.eyebrow{font-family:var(--f-mono);font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+section{display:flex;flex-direction:column;gap:28px}
+.head{display:flex;flex-direction:column;gap:10px}
+
+/* logo concepts */
+.concepts{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:20px}
+.concept{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px;display:flex;flex-direction:column;gap:18px;min-width:0}
+.concept.pick{border-color:var(--ink);box-shadow:0 0 0 1px var(--ink)}
+.stage{display:flex;align-items:center;justify-content:center;background:var(--paper);border-radius:10px;padding:28px 12px;min-height:150px}
+.stage svg{width:96px;height:96px}
+.sizes{display:flex;align-items:flex-end;gap:14px}
+.sizes svg{display:block}
+.tag{font-family:var(--f-mono);font-size:.7rem;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--muted);align-self:flex-start}
+.pick .tag{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.concept p{font-size:.9rem;color:var(--muted)}
+
+/* lockups */
+.lockups{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px}
+.lock{border-radius:14px;padding:36px 28px;display:flex;flex-direction:column;gap:26px;border:1px solid var(--line);min-width:0}
+.lock.l{background:#fafaf9;color:#1c1917;--tile:#1c1917;--tile-fg:#fafaf9;--slot:#10b981}
+.lock.d{background:#141210;color:#f5f5f4;--tile:#f5f5f4;--tile-fg:#1c1917;--slot:#34d399;border-color:#141210}
+.lockup{display:flex;align-items:center;gap:12px}
+.lockup svg{width:44px;height:44px;flex:none}
+.wm{display:flex;flex-direction:column;line-height:1}
+.wm b{font-family:var(--f-display);font-weight:800;font-size:1.55rem;letter-spacing:-.03em}
+.wm b i{font-style:normal;color:var(--slot)}
+.wm small{font-family:var(--f-mono);font-size:.62rem;letter-spacing:.16em;margin-top:5px;opacity:.6}
+.lockup.sm svg{width:32px;height:32px}.lockup.sm .wm b{font-size:1.1rem}.lockup.sm .wm small{font-size:.55rem}
+
+/* palette + type */
+.palette{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
+.sw{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--card)}
+.sw div{height:72px}
+.sw span{display:block;padding:10px 12px;font-size:.8rem;line-height:1.35}
+.sw code{font-family:var(--f-mono);font-size:.72rem;color:var(--muted);display:block}
+.typeb{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:26px;display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:26px}
+.typeb .big{font-family:var(--f-display);font-weight:800;font-size:2.4rem;letter-spacing:-.03em;line-height:1}
+.typeb .mono{font-family:var(--f-mono);font-size:.85rem}
+
+/* wireframes */
+.ba{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:24px}
+.frame{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.frame>header{padding:10px 14px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;font-size:.75rem}
+.frame>header .eyebrow{color:var(--ink)}
+.nav{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line)}
+.nav .mk{width:20px;height:20px;border-radius:6px;background:var(--tile)}
+.nav .nm{font:700 .72rem var(--f-display)}
+.nav .sp{flex:1}
+.nav .pill{height:14px;border-radius:7px;background:var(--line);width:34px}
+.body{padding:14px;display:grid;gap:10px;flex:1}
+.cols3{grid-template-columns:1fr 1.15fr 1fr}
+.cols2{grid-template-columns:1fr 1.25fr}
+.box{border:1px solid var(--line);border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:7px;min-width:0}
+.box .t{font:700 .66rem var(--f-body);color:var(--ink)}
+.box .n{font-size:.62rem;color:var(--muted);line-height:1.4}
+.line{height:7px;border-radius:4px;background:var(--line)}
+.line.s{width:60%}
+.chips{display:grid;grid-template-columns:repeat(4,1fr);gap:5px}
+.chip{border:1px solid var(--line);border-radius:6px;font-size:.6rem;text-align:center;padding:5px 0;color:var(--muted)}
+.chip.on{background:var(--tile);color:var(--tile-fg);border-color:var(--tile)}
+.cal{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+.cal i{aspect-ratio:1;border-radius:5px;background:var(--line);opacity:.45}
+.cal i.a{opacity:1;background:transparent;border:1px solid var(--line);position:relative}
+.cal i.a::after{content:"";position:absolute;left:50%;bottom:2px;width:3px;height:3px;border-radius:50%;background:var(--slot);transform:translateX(-50%)}
+.cal i.sel{background:var(--tile);border-color:var(--tile);opacity:1}
+.slots{display:grid;gap:5px}
+.slot{border:1px solid var(--line);border-radius:6px;font:500 .62rem var(--f-mono);padding:6px 8px;display:flex;justify-content:space-between}
+.slot.x{color:var(--muted);text-decoration:line-through;opacity:.5}
+.slot.go{border-color:var(--slot);color:var(--slot)}
+.collapsed{font-size:.6rem;color:var(--muted);border:1px dashed var(--line);border-radius:6px;padding:5px 8px}
+.cta{background:var(--tile);color:var(--tile-fg);border-radius:7px;text-align:center;font-size:.64rem;font-weight:600;padding:7px}
+.badge{font:500 .56rem var(--f-mono);border-radius:99px;padding:2px 7px;background:color-mix(in srgb,var(--nostr) 14%,transparent);color:var(--nostr);align-self:flex-start}
+.stat{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.stat .box{gap:3px}
+.stat b{font:800 1rem var(--f-display)}
+
+/* notes */
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;list-style:none;margin:0;padding:0}
+.notes li{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;display:flex;flex-direction:column;gap:4px}
+.notes b{font-family:var(--f-display)}
+.notes span{color:var(--muted);font-size:.9rem}
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <!-- A: Open slot. Availability grid, one slot lit. -->
+    <symbol id="mk-a" viewBox="0 0 64 64">
+      <rect width="64" height="64" rx="16" fill="var(--tile)"/>
+      <g fill="var(--tile-fg)" opacity=".42">
+        <circle cx="18" cy="18" r="3.4"/><circle cx="32" cy="18" r="3.4"/><circle cx="46" cy="18" r="3.4"/>
+        <circle cx="18" cy="32" r="3.4"/><circle cx="32" cy="32" r="3.4"/>
+        <circle cx="18" cy="46" r="3.4"/><circle cx="32" cy="46" r="3.4"/><circle cx="46" cy="46" r="3.4"/>
+      </g>
+      <circle cx="46" cy="32" r="6.2" fill="var(--slot)"/>
+    </symbol>
+    <!-- B: Pinned day. Keeps today's calendar icon, adds the green slot. -->
+    <symbol id="mk-b" viewBox="0 0 64 64">
+      <rect width="64" height="64" rx="16" fill="var(--tile)"/>
+      <rect x="15" y="18" width="34" height="31" rx="7" fill="none" stroke="var(--tile-fg)" stroke-width="3.6"/>
+      <path d="M24 13v10M40 13v10M15 30h34" stroke="var(--tile-fg)" stroke-width="3.6" stroke-linecap="round"/>
+      <circle cx="39" cy="40" r="4.6" fill="var(--slot)"/>
+    </symbol>
+    <!-- C: Monogram. A "c" with the dot as a booked slot. -->
+    <symbol id="mk-c" viewBox="0 0 64 64">
+      <rect width="64" height="64" rx="16" fill="var(--tile)"/>
+      <path d="M40.7 22.5A14.5 14.5 0 1 0 40.7 41.5" fill="none" stroke="var(--tile-fg)" stroke-width="7.5" stroke-linecap="round"/>
+      <circle cx="47" cy="32" r="4.6" fill="var(--slot)"/>
+    </symbol>
+  </defs>
+</svg>
+
+<div class="wrap">
+
+<section>
+  <div class="head">
+    <span class="eyebrow">cal.emre.xyz · NIP-52 · identity proposal</span>
+    <h1>A small mark for a calendar that belongs to you</h1>
+    <p class="lede">The site is quiet, near-black on warm white, with one green dot to say "this day is open". The proposal keeps that voice. The logo is that dot, given a home.</p>
+  </div>
+</section>
+
+<section>
+  <div class="head">
+    <h2>Three logo directions</h2>
+    <p class="lede">All three are a rounded tile, so they drop straight into the current header and work as a favicon. Each is shown large, then at 32, 24 and 16 px.</p>
+  </div>
+  <div class="concepts">
+    <article class="concept pick">
+      <span class="tag">recommended</span>
+      <div class="stage"><svg role="img" aria-label="Open slot mark"><use href="#mk-a"/></svg></div>
+      <div class="sizes"><svg width="32" height="32"><use href="#mk-a"/></svg><svg width="24" height="24"><use href="#mk-a"/></svg><svg width="16" height="16"><use href="#mk-a"/></svg></div>
+      <h3>A · Open slot</h3>
+      <p>A grid of time slots with one lit in green. It is what visitors see on the booking page, so the brand and the product say the same thing. It stays readable at 16 px because the lit dot is the only bright element.</p>
+    </article>
+    <article class="concept">
+      <span class="tag">safest</span>
+      <div class="stage"><svg role="img" aria-label="Pinned day mark"><use href="#mk-b"/></svg></div>
+      <div class="sizes"><svg width="32" height="32"><use href="#mk-b"/></svg><svg width="24" height="24"><use href="#mk-b"/></svg><svg width="16" height="16"><use href="#mk-b"/></svg></div>
+      <h3>B · Pinned day</h3>
+      <p>Your current calendar icon with the green dot added. Nobody has to relearn it. It is the least distinctive of the three, since any calendar app uses this shape.</p>
+    </article>
+    <article class="concept">
+      <span class="tag">boldest</span>
+      <div class="stage"><svg role="img" aria-label="Monogram mark"><use href="#mk-c"/></svg></div>
+      <div class="sizes"><svg width="32" height="32"><use href="#mk-c"/></svg><svg width="24" height="24"><use href="#mk-c"/></svg><svg width="16" height="16"><use href="#mk-c"/></svg></div>
+      <h3>C · Monogram</h3>
+      <p>A "c" that leaves its mouth open, with the dot sitting in the gap as a booked slot. It reads as a letter first and a calendar second, and it holds up best at tiny sizes.</p>
+    </article>
+  </div>
+</section>
+
+<section>
+  <div class="head">
+    <h2>Wordmark and lockups</h2>
+    <p class="lede">Shown with concept A. The dot in the domain is green, so the name carries the same signal as the mark. "NIP-52" stays as the small mono line you already have.</p>
+  </div>
+  <div class="lockups">
+    <div class="lock l">
+      <div class="lockup"><svg><use href="#mk-a"/></svg><div class="wm"><b>cal<i>.</i>emre.xyz</b><small>NIP-52</small></div></div>
+      <div class="lockup sm"><svg><use href="#mk-a"/></svg><div class="wm"><b>cal<i>.</i>emre.xyz</b><small>NIP-52</small></div></div>
+    </div>
+    <div class="lock d">
+      <div class="lockup"><svg><use href="#mk-a"/></svg><div class="wm"><b>cal<i>.</i>emre.xyz</b><small>NIP-52</small></div></div>
+      <div class="lockup sm"><svg><use href="#mk-a"/></svg><div class="wm"><b>cal<i>.</i>emre.xyz</b><small>NIP-52</small></div></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="head">
+    <h2>Color and type</h2>
+    <p class="lede">Nothing new to learn. Ink and paper stay the base, green means open or confirmed, purple is reserved for Nostr and the community badge.</p>
+  </div>
+  <div class="palette">
+    <div class="sw"><div style="background:#1c1917"></div><span>Ink<code>#1C1917</code></span></div>
+    <div class="sw"><div style="background:#fafaf9"></div><span>Paper<code>#FAFAF9</code></span></div>
+    <div class="sw"><div style="background:#10b981"></div><span>Open slot<code>#10B981</code></span></div>
+    <div class="sw"><div style="background:#8b5cf6"></div><span>Nostr<code>#8B5CF6</code></span></div>
+    <div class="sw"><div style="background:#dc2626"></div><span>Cancel only<code>#DC2626</code></span></div>
+  </div>
+  <div class="typeb">
+    <div><div class="eyebrow">Display, wordmark and headings</div><div class="big">Bricolage Grotesque</div></div>
+    <div><div class="eyebrow">Interface text</div><p style="margin-top:8px">Instrument Sans for labels, buttons and descriptions. Turkish characters (ğ ş ı İ ö ü ç) render correctly in both.</p></div>
+    <div><div class="eyebrow">Protocol details</div><p class="mono" style="margin-top:8px">delirehberi@emre.xyz<br>npub1gmeu0…wl3v<br>13:30 – 14:00 · Europe/Istanbul</p></div>
+  </div>
+</section>
+
+<section>
+  <div class="head">
+    <h2>Booking page layout</h2>
+    <p class="lede">The current page works, but a visitor has to scroll past two tall cards before they reach the calendar, and the slot list is mostly crossed-out times. The proposal puts the whole choice on one screen: how long, which day, which time.</p>
+  </div>
+  <div class="ba">
+    <div class="frame">
+      <header><span class="eyebrow">Today</span><span style="color:var(--muted)">2 columns, long scroll</span></header>
+      <div class="nav"><div class="mk"></div><div class="nm">cal.emre.xyz</div><div class="sp"></div><div class="pill"></div><div class="pill"></div><div class="pill" style="width:50px"></div></div>
+      <div class="body cols2">
+        <div style="display:grid;gap:10px;align-content:start">
+          <div class="box"><div class="t">Profile</div><div class="line"></div><div class="line s"></div></div>
+          <div class="box"><div class="t">Duration</div><div class="chips"><div class="chip">15</div><div class="chip on">30</div><div class="chip">45</div><div class="chip">1h</div><div class="chip">1.5h</div><div class="chip">2h</div><div class="chip">3h</div><div class="chip">4h</div></div><div class="n">9 options</div></div>
+          <div class="box"><div class="t">Calendar</div><div class="cal"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="sel"></i><i class="a"></i><i class="a"></i><i class="a"></i><i class="a"></i><i></i><i></i></div></div>
+        </div>
+        <div style="display:grid;gap:10px;align-content:start">
+          <div class="box"><div class="t">Slots</div><div class="slots"><div class="slot x">06:00</div><div class="slot x">06:30</div><div class="slot x">07:00</div><div class="slot x">07:30</div><div class="slot x">08:00</div><div class="slot x">…12 more</div><div class="slot go">13:30</div></div></div>
+          <div class="box"><div class="n">Nostr explainer</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="frame">
+      <header><span class="eyebrow">Proposed</span><span style="color:var(--muted)">3 steps, one screen</span></header>
+      <div class="nav"><svg width="20" height="20"><use href="#mk-a"/></svg><div class="nm">cal<span style="color:var(--slot)">.</span>emre.xyz</div><div class="sp"></div><div class="pill" style="width:20px"></div><div class="pill" style="width:50px"></div></div>
+      <div class="body cols3">
+        <div style="display:grid;gap:10px;align-content:start">
+          <div class="box"><div class="t">delirehberi ✓</div><div class="n">Istanbul · replies on Nostr</div><div class="line"></div></div>
+          <div class="box"><div class="t">1 · How long</div><div class="chips" style="grid-template-columns:repeat(2,1fr)"><div class="chip">15</div><div class="chip on">30</div><div class="chip">45</div><div class="chip">60</div></div><div class="n">+ longer…</div></div>
+        </div>
+        <div class="box" style="align-content:start"><div class="t">2 · Which day</div><div class="cal"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="sel"></i><i class="a"></i><i class="a"></i><i class="a"></i><i class="a"></i><i></i><i></i><i class="a"></i><i class="a"></i><i class="a"></i><i class="a"></i><i class="a"></i></div><div class="n">● days with free time</div></div>
+        <div class="box" style="align-content:start"><div class="t">3 · Which time</div><div class="slots"><div class="collapsed">12 earlier slots passed</div><div class="slot go">13:30 <span>free</span></div></div><div class="n">Pick a time to reveal the form here, in place.</div><div class="cta">Continue</div></div>
+      </div>
+      <div style="padding:0 14px 14px"><div class="box" style="flex-direction:row;align-items:center;gap:10px"><span class="badge">nostr</span><div class="n">Published as NIP-52 events on open relays. One line, link to nostr.org.tr.</div></div></div>
+    </div>
+  </div>
+  <ul class="notes">
+    <li><b>Duration as four chips</b><span>15, 30, 45, 60 cover most meetings. "Longer" opens the rest. Nine equal buttons make the common choice harder to see.</span></li>
+    <li><b>Show only open times</b><span>Fold past and booked slots into one line. The list then shows what the visitor can actually pick.</span></li>
+    <li><b>Form replaces the slot list</b><span>After a time is chosen the form opens in that same column, so the calendar stays in view and the choice can be changed with one click.</span></li>
+    <li><b>Timezone near the times</b><span>Keep the visitor's timezone selector directly above the slots, defaulting to the browser's zone, not Atlantic/Reykjavik.</span></li>
+  </ul>
+</section>
+
+<section>
+  <div class="head">
+    <h2>Owner dashboard</h2>
+    <p class="lede">The dashboard is already clear. It needs a summary on top and the share link kept within reach.</p>
+  </div>
+  <div class="frame" style="max-width:720px">
+    <header><span class="eyebrow">Proposed</span><span style="color:var(--muted)">summary first, tabs below</span></header>
+    <div class="body">
+      <div class="box" style="flex-direction:row;align-items:center;gap:10px"><div class="t" style="flex:1">cal.emre.xyz/#/delirehberi@emre.xyz</div><div class="chip" style="padding:5px 10px">Copy</div><div class="chip" style="padding:5px 10px">Open</div></div>
+      <div class="stat"><div class="box"><span class="n">Upcoming</span><b>1</b></div><div class="box"><span class="n">Waiting for reply</span><b>0</b></div><div class="box"><span class="n">This month</span><b>4</b></div></div>
+      <div class="box"><div class="t">Availability · Appointments</div><div class="line"></div><div class="line s"></div><div class="n">Weekday toggles, hours and buffer in one compact row, as today.</div></div>
+    </div>
+  </div>
+  <ul class="notes">
+    <li><b>Turkish wording</b><span>"Ev Sahibi" is a literal translation of "Host". "Takvim sahibi" or "Organizatör" reads more naturally.</span></li>
+    <li><b>Default event title follows the language</b><span>The appointment shows "Appointment with Host delirehberi" in the Turkish UI. Generate it in the active language.</span></li>
+    <li><b>Danger only for cancel</b><span>Keep red for "Toplantıyı İptal Et" and nowhere else. "Reddet" can stay neutral.</span></li>
+    <li><b>Header</b><span>Move EN / TR / ES into a small menu next to the theme toggle. The row then holds the logo, two links and your avatar.</span></li>
+  </ul>
+</section>
+
+</div>
